@@ -10,7 +10,23 @@ from src.infrastructure.models.base import Base
 
 
 class Profile(Base):
+
     __tablename__ = "profiles"
+
+    def apply_analysis(
+        self,
+        *,
+        profile_summary: str,
+        structured_data: dict,
+        preferences: dict,
+        target_titles: list[str],
+        contacts: dict
+    ) -> None:
+        self.profile_summary = profile_summary.strip()
+        self.structured_data = structured_data
+        self.preferences = preferences
+        self.target_titles = target_titles
+        self.contacts = contacts
 
     id: Mapped[UUID] = mapped_column(
         primary_key=True,

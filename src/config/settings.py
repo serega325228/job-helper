@@ -10,6 +10,7 @@ from pydantic import (
 )
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy import URL
 
 
 class Environment(StrEnum):
@@ -41,13 +42,37 @@ class AppSettings(BaseSettings):
 
 
 class DatabaseSettings(BaseSettings):
-    path: Path = Path("data/app.db")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        env_prefix="DB_",
+        extra="ignore",
+    )
+
+    driver: str = "postgresql+asyncpg"
+
+    host: str = "localhost"
+    port: int = 5432
+
+    user: str = "postgres"
+    password: SecretStr = SecretStr("postgres")
+    database: str = "job_finder"
+
     echo: bool = False
+    pool_pre_ping: bool = True
+    pool_size: int = 5
+    max_overflow: int = 10
 
     @property
-    def url(self) -> str:
-        absolute_path = self.path.resolve()
-        return f"sqlite+aiosqlite:///{absolute_path.as_posix()}"
+    def url(self) -> URL:
+        return URL.create(
+            drivername=self.driver,
+            username=self.user,
+            password=self.password.get_secret_value(),
+            host=self.host,
+            port=self.port,
+            database=self.database,
+        )
 
 
 class LLMSettings(BaseSettings):
@@ -62,6 +87,28 @@ class LLMSettings(BaseSettings):
 
     request_timeout_seconds: float = Field(default=60.0, gt=0)
     max_retries: int = Field(default=3, ge=0)
+
+class EmbeddingSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="EMBEDDING_",
+        env_file=".env",
+    )
+
+    model_path: Path = Path(
+        "~/projects/job-helper/.models/"
+        "embeddinggemma-300M-Q8_0.gguf"
+    )
+
+    @property
+    def resolved_model_path(self) -> Path:
+        path = self.model_path.expanduser().resolve()
+
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"Embedding model not found: {path}"
+            )
+
+        return path
 
 
 class AgentSettings(BaseSettings):
@@ -91,8 +138,9 @@ class LoggingSettings(BaseSettings):
 
 class Settings(BaseSettings):
     app: AppSettings = AppSettings()
-    database: DatabaseSettings
+    database: DatabaseSettings = DatabaseSettings()
     llm: LLMSettings
+    embedding: EmbeddingSettings = EmbeddingSettings()
     agents: AgentSettings = AgentSettings()
     logging: LoggingSettings = LoggingSettings()
 

@@ -1,12 +1,13 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 
 from dishka import Provider, Scope, provide
 from sqlalchemy.ext.asyncio.session import AsyncSession
 
-from src.config.settings import Settings
+from src.config.settings import EmbeddingSettings, Settings
 from src.infrastructure.db.engine import Database
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.repositories.profile import ProfileRepository
+from src.services.embedding import EmbeddingService
 from src.services.profile import ProfileService
 
 
@@ -51,3 +52,15 @@ class ServiceProvider(Provider):
         ProfileService,
         scope=Scope.REQUEST,
     )
+
+    @provide(scope=Scope.APP)
+    def embedding_service(
+        self,
+        settings: Settings,
+    ) -> Iterator[EmbeddingService]:
+        service = EmbeddingService(str(settings.embedding.resolved_model_path))
+
+        try:
+            yield service
+        finally:
+            service.close()

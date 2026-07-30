@@ -15,8 +15,11 @@ from src.config.settings import DatabaseSettings
 class Database:
     def __init__(self, settings: DatabaseSettings) -> None:
         self._engine = create_async_engine(
-            settings.url,
+            url=settings.url,
             echo=settings.echo,
+            pool_pre_ping=settings.pool_pre_ping,
+            pool_size=settings.pool_size,
+            max_overflow=settings.max_overflow,
         )
 
         self._session_factory = async_sessionmaker(
@@ -25,8 +28,6 @@ class Database:
             expire_on_commit=False,
             autoflush=False,
         )
-
-        self._configure_sqlite()
 
     @property
     def engine(self) -> AsyncEngine:
@@ -39,17 +40,3 @@ class Database:
 
     async def dispose(self) -> None:
         await self._engine.dispose()
-
-    def _configure_sqlite(self) -> None:
-        @event.listens_for(self._engine.sync_engine, "connect")
-        def set_sqlite_pragmas(
-            dbapi_connection: object,
-            connection_record: object,
-        ) -> None:
-            cursor = dbapi_connection.cursor()
-
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA busy_timeout=5000")
-
-            cursor.close()
