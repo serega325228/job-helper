@@ -9,7 +9,7 @@ from sqlalchemy.types import DateTime, Text, String
 from src.infrastructure.models.base import Base
 
 
-class VacancyModel(Base):
+class Vacancy(Base):
     __tablename__ = "vacancies"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)

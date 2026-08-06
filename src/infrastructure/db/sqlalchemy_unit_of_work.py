@@ -4,6 +4,7 @@ from typing import Self
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.repositories.profile import ProfileRepository
+from src.repositories.vacancy import VacancyRepository
 
 
 class SqlAlchemyUnitOfWork:
@@ -11,10 +12,12 @@ class SqlAlchemyUnitOfWork:
         self,
         session: AsyncSession,
         profile_repository: ProfileRepository,
+        vacancy_repository: VacancyRepository,
     ) -> None:
         self._session = session
 
         self.profiles = profile_repository
+        self.vacancies = vacancy_repository
         self._active = False
 
     async def __aenter__(self) -> Self:

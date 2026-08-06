@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator, Iterator
 from dishka import Provider, Scope, provide
 from sqlalchemy.ext.asyncio.session import AsyncSession
 
-from src.config.settings import EmbeddingSettings, Settings
+from src.config.settings import Settings
 from src.infrastructure.db.engine import Database
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.repositories.profile import ProfileRepository
