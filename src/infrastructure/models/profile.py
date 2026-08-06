@@ -1,10 +1,9 @@
 from datetime import datetime
-
 from uuid import UUID, uuid4
+
 from sqlalchemy import JSON
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.sql.functions import func
-from sqlalchemy.types import DateTime, Text, String
+from sqlalchemy.types import DateTime, String, Text
 
 from src.infrastructure.models.base import Base
 
@@ -46,6 +45,13 @@ class Profile(Base):
     profile_summary: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
+    )
+
+    analysis_status: Mapped[str] = mapped_column(
+        String(30),
+        default="pending",
+        nullable=False,
+        index=True,
     )
 
     structured_data: Mapped[dict] = mapped_column(

@@ -1,7 +1,7 @@
 from collections.abc import AsyncIterator
 from typing import Protocol
 
-from src.dtos.vacancy import RawVacancy, VacancyReference, VacancySearchQuery
+from src.schemas.vacancy import RawVacancy, VacancyReference, VacancySearchQuery
 
 
 class VacancySource(Protocol):
@@ -9,12 +9,10 @@ class VacancySource(Protocol):
 
     def search(
         self,
-        query: "VacancySearchQuery",
-    ) -> AsyncIterator["VacancyReference"]:
-        ...
+        query: VacancySearchQuery,
+    ) -> AsyncIterator[VacancyReference]: ...
 
     async def fetch_details(
         self,
-        vacancy: "VacancyReference",
-    ) -> "RawVacancy":
-        ...
+        vacancy: VacancyReference,
+    ) -> RawVacancy: ...

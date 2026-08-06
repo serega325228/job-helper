@@ -3,12 +3,11 @@ from functools import lru_cache
 from pathlib import Path
 
 from pydantic import (
+    AliasChoices,
     Field,
     HttpUrl,
     SecretStr,
-    computed_field,
 )
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
 
@@ -28,8 +27,8 @@ class LogLevel(StrEnum):
     CRITICAL = "CRITICAL"
 
 class LogFormat(StrEnum):
-    CONSOLE = "CONSOLE"
-    JSON = "JSON"
+    CONSOLE = "console"
+    JSON = "json"
 
 
 class AppSettings(BaseSettings):
@@ -76,11 +75,22 @@ class DatabaseSettings(BaseSettings):
 
 
 class LLMSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
     provider: str = "openrouter"
-    model: str = "google/gemini-2.5-flash"
+    model: str = Field(
+        default="google/gemini-2.5-flash",
+        validation_alias=AliasChoices("LLM_MODEL", "PROCESSING_LLM"),
+    )
 
     base_url: HttpUrl = HttpUrl("https://openrouter.ai/api/v1")
-    api_key: SecretStr
+    api_key: SecretStr = Field(
+        validation_alias=AliasChoices("LLM_API_KEY", "OPENROUTER_API_KEY"),
+    )
 
     temperature: float = Field(default=0.2, ge=0, le=2)
     max_tokens: int = Field(default=4096, ge=1)
@@ -92,6 +102,7 @@ class EmbeddingSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="EMBEDDING_",
         env_file=".env",
+        extra="ignore",
     )
 
     model_path: Path = Path(
@@ -122,6 +133,19 @@ class AgentSettings(BaseSettings):
     parallel_workers: int = Field(default=4, ge=1)
 
 
+class HhSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="HH_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    user_agent: str = "job-helper/0.1"
+    access_token: SecretStr | None = None
+    request_timeout_seconds: float = Field(default=30.0, gt=0)
+
+
 class LoggingSettings(BaseSettings):
     level: LogLevel = LogLevel.INFO
     format: LogFormat = LogFormat.CONSOLE
@@ -139,9 +163,10 @@ class LoggingSettings(BaseSettings):
 class Settings(BaseSettings):
     app: AppSettings = AppSettings()
     database: DatabaseSettings = DatabaseSettings()
-    llm: LLMSettings
+    llm: LLMSettings = LLMSettings()
     embedding: EmbeddingSettings = EmbeddingSettings()
     agents: AgentSettings = AgentSettings()
+    hh: HhSettings = HhSettings()
     logging: LoggingSettings = LoggingSettings()
 
     model_config = SettingsConfigDict(

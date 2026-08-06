@@ -1,13 +1,15 @@
-from collections.abc import Iterator
-from dataclasses import dataclass
 import json
 import re
-from typing import Any, Literal
+from collections.abc import Iterator
+from typing import Any
+from urllib.parse import urldefrag, urljoin
 
 import httpx
-from pydantic import BaseModel, Field
-from playwright.async_api import Browser, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import Browser
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from selectolax.lexbor import LexborHTMLParser
+
+from src.schemas.parsing import DownloadedPage, VacancyDocument
 
 UNWANTED_SELECTORS = """
 script,
@@ -30,24 +32,6 @@ JOB_URL_PATTERN = re.compile(
     r"/(?:jobs?|vacanc(?:y|ies)|careers?|positions?|openings?)(?:/|[-_?=])",
     re.IGNORECASE,
 )
-
-class VacancyDocument(BaseModel):
-    url: str
-    title_hint: str | None = None
-    clean_text: str = Field(max_length=30_000)
-    structured_data: dict[str, Any] | None = None
-
-    extraction_source: Literal[
-        "json_ld",
-        "html",
-    ]
-
-@dataclass(slots=True)
-class DownloadedPage:
-    url: str
-    html: str
-    rendered: bool
-
 
 def visible_text_length(html: str) -> int:
     tree = LexborHTMLParser(html)
@@ -152,7 +136,7 @@ class ParsingService:
                 yield from self.walk_json(item)
 
 
-    def extract_job_posting(self, html: str) -> list[dict]:
+    def extract_job_postings(self, html: str) -> list[dict]:
         tree = LexborHTMLParser(html)
         result: list[dict] = []
 
