@@ -26,7 +26,6 @@ class Vacancy(Base):
     company_name: Mapped[str | None] = mapped_column(String(500), index=True)
     description: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # Hard conditions stay queryable without inspecting JSON documents.
     area_id: Mapped[str | None] = mapped_column(String(100), index=True)
     country: Mapped[str | None] = mapped_column(String(255), index=True)
     city: Mapped[str | None] = mapped_column(String(255), index=True)

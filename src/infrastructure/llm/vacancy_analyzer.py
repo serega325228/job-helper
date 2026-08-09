@@ -21,8 +21,6 @@ class VacancyAnalyzer:
         payload = []
         for vacancy in raw_vacancies:
             item = vacancy.model_dump(mode="json", exclude={"fetched_at"})
-            # The source payload carries reliable salary and location metadata,
-            # while the description is already present in raw_text.
             item["raw_payload"].pop("description", None)
             item["raw_payload"].pop("branded_description", None)
             payload.append(item)

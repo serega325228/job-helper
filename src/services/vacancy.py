@@ -21,8 +21,6 @@ logger = logging.getLogger(__name__)
 
 
 class VacancyService:
-    NORMALIZER_VERSION = "llm-v1"
-
     def __init__(
         self,
         unit_of_work: SqlAlchemyUnitOfWork,
@@ -272,3 +270,18 @@ class VacancyService:
             "published_at": raw.published_at,
             "last_seen_at": seen_at,
         }
+
+    def build_vacancy_search_text(v: Vacancy) -> str:
+        return f"""
+        Title: {v.title}
+        Role: {v.role_family}
+
+        Required skills:
+        {", ".join(v.required_skills)}
+
+        Preferred skills:
+        {", ".join(v.preferred_skills)}
+
+        Responsibilities:
+        {"; ".join(v.responsibilities)}
+        """
