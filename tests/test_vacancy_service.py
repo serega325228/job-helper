@@ -1,5 +1,6 @@
 import unittest
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 from src.exceptions.vacancy import VacancyNormalizationError
 from src.infrastructure.vacancy_sources.hh.source import HhVacancySource
@@ -62,8 +63,7 @@ class FakeNormalizer:
                 salary_to=300_000,
                 salary_currency="RUR",
                 soft_conditions=VacancySoftConditions(
-                    skills=["Go", "PostgreSQL"],
-                    completeness_score=0.9,
+                    required_skills=["Go", "PostgreSQL"],
                 ),
             )
             for raw in raw_vacancies
@@ -113,12 +113,30 @@ class FakeUnitOfWork:
         self.flush_count += 1
 
 
+class FakeEmbeddingService:
+    model_name = "fake-embedding"
+
+    def embed_documents(
+        self,
+        documents: list[tuple[str | None, str]],
+    ) -> list[list[float]]:
+        return [[float(index), 1.0] for index, _ in enumerate(documents)]
+
+
+async def run_inline(function, *args):
+    return function(*args)
+
+
 class VacancyServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_hh_pipeline_normalizes_and_upserts_vacancy(self) -> None:
         client = FakeHhClient()
         source = HhVacancySource(client)
         unit_of_work = FakeUnitOfWork()
-        service = VacancyService(unit_of_work, FakeNormalizer())
+        service = VacancyService(
+            unit_of_work,
+            FakeNormalizer(),
+            FakeEmbeddingService(),
+        )
         query = VacancySearchQuery(
             text="golang developer",
             area_ids=["1"],
@@ -126,8 +144,9 @@ class VacancyServiceTests(unittest.IsolatedAsyncioTestCase):
             published_after=datetime(2026, 8, 1, tzinfo=UTC),
         )
 
-        first = await service.ingest_vacancies(source, query)
-        second = await service.ingest_vacancies(source, query)
+        with patch("src.services.vacancy.asyncio.to_thread", new=run_inline):
+            first = await service.ingest_vacancies(source, query)
+            second = await service.ingest_vacancies(source, query)
 
         self.assertEqual(len(first), 1)
         self.assertEqual(len(second), 1)
@@ -135,8 +154,14 @@ class VacancyServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(unit_of_work.vacancies.items), 1)
         self.assertEqual(first[0].salary_from, 200_000)
         self.assertEqual(first[0].work_format, WorkFormat.REMOTE)
-        self.assertEqual(first[0].soft_conditions["skills"], ["Go", "PostgreSQL"])
+        self.assertEqual(
+            first[0].soft_conditions["required_skills"],
+            ["Go", "PostgreSQL"],
+        )
         self.assertEqual(first[0].raw_payload["id"], "42")
+        self.assertEqual(first[0].embedding_model, "fake-embedding")
+        self.assertIsNotNone(first[0].content_embedding)
+        self.assertIsNotNone(first[0].title_embedding)
         self.assertEqual(client.details_calls, ["42", "42"])
         self.assertEqual(client.search_params[0]["area"], ["1"])
         self.assertEqual(
@@ -146,7 +171,11 @@ class VacancyServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("date_from", client.search_params[0])
 
     async def test_normalization_rejects_mismatched_external_ids(self) -> None:
-        service = VacancyService(FakeUnitOfWork(), InvalidNormalizer())
+        service = VacancyService(
+            FakeUnitOfWork(),
+            InvalidNormalizer(),
+            FakeEmbeddingService(),
+        )
         raw = RawVacancy(
             source="hh",
             external_id="42",
@@ -159,7 +188,11 @@ class VacancyServiceTests(unittest.IsolatedAsyncioTestCase):
             await service.normalize_vacancies([raw])
 
     async def test_invalid_pipeline_limits_fail_fast(self) -> None:
-        service = VacancyService(FakeUnitOfWork(), FakeNormalizer())
+        service = VacancyService(
+            FakeUnitOfWork(),
+            FakeNormalizer(),
+            FakeEmbeddingService(),
+        )
         source = HhVacancySource(FakeHhClient())
         query = VacancySearchQuery(text="developer")
 

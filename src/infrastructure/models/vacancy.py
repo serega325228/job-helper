@@ -1,13 +1,18 @@
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import Float, ForeignKey, Index, UniqueConstraint
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import ForeignKey, Index, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import Boolean, DateTime, String, Text
 
 from src.infrastructure.models.base import Base
+from src.infrastructure.models.constants import EMBEDDING_DIMENSIONS
+
+if TYPE_CHECKING:
+    from src.infrastructure.models.vacancy_match import VacancyMatch
 
 
 class Vacancy(Base):
@@ -50,12 +55,12 @@ class Vacancy(Base):
         default=dict,
         nullable=False,
     )
-    completeness_score: Mapped[float] = mapped_column(
-        Float,
-        default=0.0,
-        nullable=False,
+    content_embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(EMBEDDING_DIMENSIONS),
     )
-    normalizer_version: Mapped[str | None] = mapped_column(String(100))
+    title_embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(EMBEDDING_DIMENSIONS),
+    )
 
     status: Mapped[str] = mapped_column(
         String(30),
@@ -84,6 +89,12 @@ class Vacancy(Base):
         nullable=False,
     )
 
+    vacancy_matches: Mapped[list[VacancyMatch]] = relationship(
+        back_populates="vacancy",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
     __table_args__ = (
         UniqueConstraint(
             "source",
@@ -94,5 +105,17 @@ class Vacancy(Base):
             "ix_vacancies_soft_conditions_gin",
             "soft_conditions",
             postgresql_using="gin",
+        ),
+        Index(
+            "ix_vacancies_content_embedding_hnsw",
+            "content_embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"content_embedding": "vector_cosine_ops"},
+        ),
+        Index(
+            "ix_vacancies_title_embedding_hnsw",
+            "title_embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"title_embedding": "vector_cosine_ops"},
         ),
     )

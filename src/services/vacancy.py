@@ -16,6 +16,8 @@ from src.schemas.vacancy import (
     VacancyReference,
     VacancySearchQuery,
 )
+from src.services.embedding import EmbeddingService
+from src.services.embedding_text import build_vacancy_search_text
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +27,11 @@ class VacancyService:
         self,
         unit_of_work: SqlAlchemyUnitOfWork,
         normalizer: VacancyNormalizer,
+        embedding_service: EmbeddingService,
     ) -> None:
         self._uow = unit_of_work
         self._normalizer = normalizer
+        self._embedding = embedding_service
 
     async def ingest_vacancies(
         self,
@@ -200,6 +204,11 @@ class VacancyService:
                 f"Raw vacancies are missing for normalized keys: {missing_raw}",
             )
 
+        embeddings = await self._build_embeddings(
+            raw_by_key,
+            normalized_vacancies,
+        )
+
         async with self._uow as uow:
             existing = await uow.vacancies.get_by_external_keys(keys)
             existing_by_key = {
@@ -217,6 +226,8 @@ class VacancyService:
                     raw=raw_by_key[key],
                     normalized=normalized,
                     seen_at=seen_at,
+                    content_embedding=embeddings[key][0],
+                    title_embedding=embeddings[key][1],
                 )
                 vacancy = existing_by_key.get(key)
 
@@ -240,6 +251,8 @@ class VacancyService:
         raw: RawVacancy,
         normalized: NormalizedVacancy,
         seen_at: datetime,
+        content_embedding: list[float],
+        title_embedding: list[float],
     ) -> dict:
         soft_conditions = normalized.soft_conditions.model_dump(mode="json")
 
@@ -264,24 +277,50 @@ class VacancyService:
             "salary_gross": normalized.salary_gross,
             "soft_conditions": soft_conditions,
             "raw_payload": raw.raw_payload,
-            "completeness_score": normalized.soft_conditions.completeness_score,
+            "content_embedding": content_embedding,
+            "title_embedding": title_embedding,
+            "embedding_model": self._embedding.model_name,
             "normalizer_version": self.NORMALIZER_VERSION,
             "status": "active",
             "published_at": raw.published_at,
             "last_seen_at": seen_at,
         }
 
-    def build_vacancy_search_text(v: Vacancy) -> str:
-        return f"""
-        Title: {v.title}
-        Role: {v.role_family}
+    async def _build_embeddings(
+        self,
+        raw_by_key: dict[tuple[str, str], RawVacancy],
+        normalized_vacancies: list[NormalizedVacancy],
+    ) -> dict[tuple[str, str], tuple[list[float], list[float]]]:
+        if not normalized_vacancies:
+            return {}
 
-        Required skills:
-        {", ".join(v.required_skills)}
+        titles = [
+            raw_by_key[(vacancy.source, vacancy.external_id)].title
+            or vacancy.title
+            for vacancy in normalized_vacancies
+        ]
+        content_documents = [
+            (title, build_vacancy_search_text(vacancy))
+            for title, vacancy in zip(titles, normalized_vacancies, strict=True)
+        ]
+        title_documents = [(None, title) for title in titles]
+        vectors = await asyncio.to_thread(
+            self._embedding.embed_documents,
+            content_documents + title_documents,
+        )
+        split_at = len(normalized_vacancies)
+        content_vectors = vectors[:split_at]
+        title_vectors = vectors[split_at:]
 
-        Preferred skills:
-        {", ".join(v.preferred_skills)}
-
-        Responsibilities:
-        {"; ".join(v.responsibilities)}
-        """
+        return {
+            (vacancy.source, vacancy.external_id): (
+                content_vector,
+                title_vector,
+            )
+            for vacancy, content_vector, title_vector in zip(
+                normalized_vacancies,
+                content_vectors,
+                title_vectors,
+                strict=True,
+            )
+        }

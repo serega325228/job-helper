@@ -3,6 +3,7 @@ from uuid import UUID
 from src.exceptions.profile import ProfileNotFoundError
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.llm.profile_analyzer import ProfileAnalyzer
+from src.infrastructure.models.preference_intent import PreferenceIntent
 from src.infrastructure.models.profile import Profile
 
 
@@ -49,14 +50,20 @@ class ProfileService:
 
             profile.apply_analysis(
                 profile_summary=result.summary,
-                structured_data=result.model_dump(
-                    exclude={"summary", "target_titles", "preferences"},
-                    mode="json",
-                ),
-                preferences=result.preferences,
-                target_titles=result.target_titles,
-                contacts=profile.contacts,
+                skills=result.skills,
+                experience=result.experience,
+                education=result.education,
+                seniority=result.seniority,
+                experience_years=result.experience_years,
             )
+            if not profile.preference_intents:
+                profile.preference_intents.extend(
+                    PreferenceIntent(
+                        profile_id=profile.id,
+                        **intent.model_dump(mode="json"),
+                    )
+                    for intent in result.preference_intents
+                )
             profile.analysis_status = "completed"
 
         return profile

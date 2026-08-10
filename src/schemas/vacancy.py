@@ -49,13 +49,14 @@ class RawVacancy(BaseModel):
 
 class VacancySoftConditions(BaseModel):
     summary: str | None = None
-    skills: list[str] = Field(default_factory=list)
+    required_skills: list[str] = Field(default_factory=list)
+    preferred_skills: list[str] = Field(default_factory=list)
     requirements: list[str] = Field(default_factory=list)
     responsibilities: list[str] = Field(default_factory=list)
+    industries: list[str] = Field(default_factory=list)
     benefits: list[str] = Field(default_factory=list)
     additional_conditions: list[str] = Field(default_factory=list)
     extraction_warnings: list[str] = Field(default_factory=list)
-    completeness_score: float = Field(default=0.0, ge=0, le=1)
 
 
 class NormalizedVacancy(BaseModel):

@@ -6,6 +6,7 @@ from sqlalchemy.types import JSON, DateTime, String, Text
 
 from src.infrastructure.models.base import Base
 
+
 class Company(Base):
     __tablename__ = "companies"
 

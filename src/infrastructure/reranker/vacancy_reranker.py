@@ -11,6 +11,7 @@ class VacancyReranker:
         model_name: str,
         batch_size: int = 16,
     ) -> None:
+        self.model_name = model_name
         self._model = CrossEncoder(
             model_name,
             activation_fn=torch.nn.Sigmoid(),

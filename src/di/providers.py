@@ -11,14 +11,19 @@ from src.infrastructure.db.engine import Database
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.llm.profile_analyzer import ProfileAnalyzer
 from src.infrastructure.llm.vacancy_analyzer import VacancyAnalyzer
+from src.infrastructure.reranker.vacancy_reranker import VacancyReranker
 from src.infrastructure.vacancy_sources.hh.client import HhApiClient
 from src.infrastructure.vacancy_sources.hh.source import HhVacancySource
 from src.ports.vacancy_normalizer import VacancyNormalizer
 from src.repositories.profile import ProfileRepository
 from src.repositories.vacancy import VacancyRepository
+from src.repositories.vacancy_match import VacancyMatchRepository
 from src.services.embedding import EmbeddingService
 from src.services.profile import ProfileService
+from src.services.scoring import ScoringService
+from src.services.skill_canonicalization import SkillCanonicalizer
 from src.services.vacancy import VacancyService
+from src.services.vacancy_match import VacancyMatchService
 
 
 class ConfigProvider(Provider):
@@ -96,15 +101,43 @@ class InfrastructureProvider(Provider):
         provides=VacancyNormalizer,
     )
 
+    @provide(scope=Scope.APP)
+    def skill_canonicalizer(self) -> SkillCanonicalizer:
+        return SkillCanonicalizer()
+
+    @provide(scope=Scope.APP)
+    def vacancy_reranker(self, settings: Settings) -> VacancyReranker:
+        return VacancyReranker(
+            settings.reranker.model_name,
+            batch_size=settings.reranker.batch_size,
+        )
+
 
 class RepositoryProvider(Provider):
     profile_repository = provide(ProfileRepository, scope=Scope.REQUEST)
     vacancy_repository = provide(VacancyRepository, scope=Scope.REQUEST)
+    vacancy_match_repository = provide(VacancyMatchRepository, scope=Scope.REQUEST)
 
 
 class ServiceProvider(Provider):
     profile_service = provide(ProfileService, scope=Scope.REQUEST)
     vacancy_service = provide(VacancyService, scope=Scope.REQUEST)
+    vacancy_match_service = provide(VacancyMatchService, scope=Scope.REQUEST)
+
+    @provide(scope=Scope.REQUEST)
+    def scoring_service(
+        self,
+        reranker: VacancyReranker,
+        embedding_service: EmbeddingService,
+        skill_canonicalizer: SkillCanonicalizer,
+        settings: Settings,
+    ) -> ScoringService:
+        return ScoringService(
+            reranker,
+            embedding_service,
+            skill_canonicalizer,
+            rerank_limit=settings.reranker.candidate_limit,
+        )
 
     @provide(scope=Scope.APP)
     def embedding_service(

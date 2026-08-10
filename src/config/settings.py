@@ -122,6 +122,18 @@ class EmbeddingSettings(BaseSettings):
         return path
 
 
+class RerankerSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="RERANKER_",
+        env_file=".env",
+        extra="ignore",
+    )
+
+    model_name: str = "BAAI/bge-reranker-v2-m3"
+    batch_size: int = Field(default=16, ge=1)
+    candidate_limit: int = Field(default=40, ge=1)
+
+
 class AgentSettings(BaseSettings):
     supervisor_model: str = "local-supervisor"
     worker_model: str = "openrouter-worker"
@@ -165,6 +177,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings = DatabaseSettings()
     llm: LLMSettings = LLMSettings()
     embedding: EmbeddingSettings = EmbeddingSettings()
+    reranker: RerankerSettings = RerankerSettings()
     agents: AgentSettings = AgentSettings()
     hh: HhSettings = HhSettings()
     logging: LoggingSettings = LoggingSettings()

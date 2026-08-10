@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.repositories.profile import ProfileRepository
 from src.repositories.vacancy import VacancyRepository
+from src.repositories.vacancy_match import VacancyMatchRepository
 
 
 class SqlAlchemyUnitOfWork:
@@ -13,11 +14,13 @@ class SqlAlchemyUnitOfWork:
         session: AsyncSession,
         profile_repository: ProfileRepository,
         vacancy_repository: VacancyRepository,
+        vacancy_match_repository: VacancyMatchRepository,
     ) -> None:
         self._session = session
 
         self.profiles = profile_repository
         self.vacancies = vacancy_repository
+        self.vacancy_matches = vacancy_match_repository
         self._active = False
 
     async def __aenter__(self) -> Self:
