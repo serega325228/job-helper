@@ -40,7 +40,6 @@ EXPERIENCE_MINIMUMS = {
     "morethan6": 6.0,
 }
 
-
 @dataclass(frozen=True, slots=True)
 class ProfileComparison:
     score: float

@@ -28,6 +28,15 @@ class ProfileService:
 
         return profile
 
+    async def get_profile(
+        self,
+        profile_id: UUID
+    ) -> Profile | None:
+        async with self._uow as uow:
+            profile = await uow.profiles.get_by_id(profile_id)
+
+        return profile
+
     async def analyze_story(self, profile_id: UUID) -> Profile:
         async with self._uow as uow:
             profile = await uow.profiles.get_by_id(profile_id)
