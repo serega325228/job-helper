@@ -1,7 +1,9 @@
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.infrastructure.models.preference_intent import PreferenceIntent
 from src.infrastructure.models.profile import Profile
 
 
@@ -16,3 +18,15 @@ class ProfileRepository:
 
     async def get_by_id(self, id: UUID) -> Profile | None:
         return await self._session.get(Profile, id)
+
+    async def get_preferences_by_profile_id(
+        self,
+        profile_id: UUID,
+    ) -> list[PreferenceIntent]:
+        statement = (
+            select(PreferenceIntent)
+            .where(PreferenceIntent.profile_id == profile_id)
+            .order_by(PreferenceIntent.created_at, PreferenceIntent.id)
+        )
+        result = await self._session.scalars(statement)
+        return list(result)

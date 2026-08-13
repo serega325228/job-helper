@@ -7,6 +7,7 @@ from src.infrastructure.vacancy_sources.hh.source import HhVacancySource
 from src.schemas.vacancy import (
     NormalizedVacancy,
     RawVacancy,
+    VacancyHardFilters,
     VacancySearchQuery,
     VacancySoftConditions,
     WorkFormat,
@@ -88,6 +89,7 @@ class InvalidNormalizer:
 class FakeVacancyRepository:
     def __init__(self) -> None:
         self.items: dict[tuple[str, str], object] = {}
+        self.filter_calls: list[tuple[VacancyHardFilters, int]] = []
 
     async def get_by_external_keys(self, keys: set[tuple[str, str]]) -> list:
         return [self.items[key] for key in keys if key in self.items]
@@ -96,6 +98,15 @@ class FakeVacancyRepository:
         for vacancy in vacancies:
             key = (vacancy.source, vacancy.external_id)
             self.items[key] = vacancy
+
+    async def list_by_hard_filters(
+        self,
+        filters: VacancyHardFilters,
+        *,
+        limit: int,
+    ) -> list:
+        self.filter_calls.append((filters, limit))
+        return list(self.items.values())
 
 
 class FakeUnitOfWork:
@@ -128,6 +139,24 @@ async def run_inline(function, *args):
 
 
 class VacancyServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lists_vacancies_by_hard_filters_through_repository(self) -> None:
+        unit_of_work = FakeUnitOfWork()
+        service = VacancyService(
+            unit_of_work,
+            FakeNormalizer(),
+            FakeEmbeddingService(),
+        )
+        filters = VacancyHardFilters(
+            cities=["Москва"],
+            work_formats=["remote"],
+            salary_min=200_000,
+        )
+
+        result = await service.list_by_hard_filters(filters, limit=40)
+
+        self.assertEqual(result, [])
+        self.assertEqual(unit_of_work.vacancies.filter_calls, [(filters, 40)])
+
     async def test_hh_pipeline_normalizes_and_upserts_vacancy(self) -> None:
         client = FakeHhClient()
         source = HhVacancySource(client)

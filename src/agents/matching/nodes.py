@@ -1,19 +1,48 @@
+from uuid import UUID
+
 from agents.matching.state import MatchingContext, MatchingState
 from exceptions.profile import ProfileNotFoundError
 from langgraph.runtime import Runtime
+from schemas.scoring import PreferenceComparison, ProfileComparison
 
 
-async def compare_profile(
+async def apply_hard_filters(
     state: MatchingState,
     runtime: Runtime[MatchingContext]
 ):
-    profile = runtime.context.profile_service.get_profile(state.profile_id)
+    vacancies = await runtime.context.vacancy_service.ids_by_hard_filters(state.hard_filters)
+
+    return {"vacancy_ids_after_hard_filters": vacancies}
+
+async def embedding_search(
+    state: MatchingState,
+    runtime: Runtime[MatchingContext]
+):
+    
+
+async def compare_vacancy(
+    state: MatchingState,
+    runtime: Runtime[MatchingContext]
+):
+    profile = await runtime.context.profile_service.get_profile(state.profile_id)
     if profile is None:
         raise ProfileNotFoundError(state.profile_id)
 
-    runtime.context.scoring_service.compare_profile(profile)
+    vacancies = await runtime.context.vacancy_service.get_vacancies_by_ids(state.vacancy_ids_after_hard_filters)
+    if vacancies is None:
+        ...
 
-    return {"raw_vacancies": raw_vacancies}
+    preferences = await runtime.context.profile_service.get_preferences(profile.id)
+    if preferences is None:
+        ...
+
+    comparisons: dict[UUID, tuple[ProfileComparison, PreferenceComparison]] = {}
+    for vacancy in vacancies:
+        profile_comparison = runtime.context.scoring_service.compare_profile(profile, vacancy)
+        _, preference_comparison = runtime.context.scoring_service.select_preference(vacancy, preferences)
+        comparisons[vacancy.id] = (profile_comparison, preference_comparison)
+
+    return {"compared_vacancies": comparisons}
 
 async def normalize_vacancies(
     state: CollectionState,

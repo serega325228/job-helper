@@ -2,7 +2,6 @@ import asyncio
 import math
 import re
 from collections import defaultdict
-from dataclasses import dataclass, field
 from typing import ClassVar
 from uuid import UUID
 
@@ -10,6 +9,7 @@ from src.infrastructure.models.preference_intent import PreferenceIntent
 from src.infrastructure.models.profile import Profile
 from src.infrastructure.models.vacancy import Vacancy
 from src.infrastructure.reranker.vacancy_reranker import VacancyReranker
+from src.schemas.scoring import PreferenceComparison, ProfileComparison
 from src.schemas.vacancy import VacancySoftConditions
 from src.schemas.vacancy_match import MatchCategory, VacancyMatchResult
 from src.services.embedding import EmbeddingService
@@ -39,20 +39,6 @@ EXPERIENCE_MINIMUMS = {
     "between3and6": 3.0,
     "morethan6": 6.0,
 }
-
-@dataclass(frozen=True, slots=True)
-class ProfileComparison:
-    score: float
-    matched_skills: list[str] = field(default_factory=list)
-    missing_skills: list[str] = field(default_factory=list)
-    components: dict[str, float] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class PreferenceComparison:
-    score: float
-    hard_constraints_passed: bool
-    components: dict[str, float] = field(default_factory=dict)
 
 
 class ScoringService:
@@ -259,23 +245,22 @@ class ScoringService:
         self,
         vacancy: Vacancy,
         preferences: list[PreferenceIntent],
-    ) -> PreferenceIntent:
+    ) -> tuple[PreferenceIntent, PreferenceComparison]:
         enabled = [preference for preference in preferences if preference.enabled]
         if not enabled:
             raise ValueError("At least one enabled preference intent is required")
 
-        valid = [
-            preference
-            for preference in enabled
-            if self.compare_preference(
+        valid: dict[PreferenceIntent, PreferenceComparison] = {}
+        for preference in enabled:
+            comparison = self.compare_preference(
                 preference,
                 vacancy,
-            ).hard_constraints_passed
-        ]
-        selectable = valid or enabled
+            )
+            if comparison.hard_constraints_passed:
+                valid[preference] = comparison
 
         def selection_score(preference: PreferenceIntent) -> float:
-            structured = self.compare_preference(preference, vacancy).score
+            structured = valid[preference].score
             title_semantic = self._cosine_similarity(
                 preference.title_embedding,
                 vacancy.title_embedding,
@@ -300,7 +285,8 @@ class ScoringService:
                 return (semantic * 0.75 + structured * 0.25) * preference.weight
             return structured * preference.weight
 
-        return max(selectable, key=selection_score)
+        best_preference = max(valid.keys(), key=selection_score)
+        return (best_preference, valid[best_preference])
 
     async def score(
         self,
@@ -341,7 +327,7 @@ class ScoringService:
             )
 
         candidates.sort(key=lambda item: item[4], reverse=True)
-        candidates = candidates[:self._rerank_limit]
+        candidates = candidates[: self._rerank_limit]
         if not candidates:
             return []
 
@@ -459,10 +445,10 @@ class ScoringService:
         available_weight = sum(weights[name] for name in components)
         if available_weight == 0:
             return 0.5
-        return sum(
-            components[name] * weights[name]
-            for name in components
-        ) / available_weight
+        return (
+            sum(components[name] * weights[name] for name in components)
+            / available_weight
+        )
 
     @staticmethod
     def _geometric_score(

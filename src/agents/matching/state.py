@@ -2,18 +2,22 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from pydantic.main import BaseModel
+
+from schemas.scoring import PreferenceComparison, ProfileComparison
+from schemas.vacancy import VacancyHardFilters
 from services.profile import ProfileService
-from services.scoring import ProfileComparison, ScoringService
+from services.scoring import ScoringService
 from services.vacancy import VacancyService
 
 
 class MatchingState(BaseModel):
     profile_id: UUID
-    preference_intent_ids: list[UUID]
-    hard_filters:
+    hard_filters: VacancyHardFilters
     limit: int
 
-    profile_comparison: ProfileComparison
+    vacancy_ids_after_hard_filters: list[UUID]
+    preference_id: UUID
+    compared_vacancies: dict[UUID, tuple[ProfileComparison, PreferenceComparison]]
 
     vacancy_match_ids: list[UUID]
 

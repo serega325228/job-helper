@@ -28,6 +28,27 @@ class VacancySearchQuery(BaseModel):
     published_after: datetime | None = None
 
 
+class VacancyHardFilters(BaseModel):
+    sources: list[str] = Field(default_factory=list)
+    statuses: list[str] = Field(default_factory=lambda: ["active"])
+    area_ids: list[str] = Field(default_factory=list)
+    countries: list[str] = Field(default_factory=list)
+    cities: list[str] = Field(default_factory=list)
+    company_names: list[str] = Field(default_factory=list)
+    excluded_company_names: list[str] = Field(default_factory=list)
+
+    work_formats: list[WorkFormat] = Field(default_factory=list)
+    employment_types: list[EmploymentType] = Field(default_factory=list)
+    work_schedules: list[str] = Field(default_factory=list)
+    experience: list[str] = Field(default_factory=list)
+    seniorities: list[str] = Field(default_factory=list)
+
+    salary_min: int | None = Field(default=None, ge=0)
+    salary_currency: str | None = Field(default=None, min_length=1, max_length=10)
+    salary_gross: bool | None = None
+    published_after: datetime | None = None
+
+
 class VacancyReference(BaseModel):
     source: str = Field(min_length=1, max_length=50)
     external_id: str = Field(min_length=1, max_length=500)

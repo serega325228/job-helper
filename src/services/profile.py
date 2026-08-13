@@ -30,12 +30,19 @@ class ProfileService:
 
     async def get_profile(
         self,
-        profile_id: UUID
+        profile_id: UUID,
     ) -> Profile | None:
         async with self._uow as uow:
             profile = await uow.profiles.get_by_id(profile_id)
 
         return profile
+
+    async def get_preferences(
+        self,
+        profile_id: UUID,
+    ) -> list[PreferenceIntent]:
+        async with self._uow as uow:
+            return await uow.profiles.get_preferences_by_profile_id(profile_id)
 
     async def analyze_story(self, profile_id: UUID) -> Profile:
         async with self._uow as uow:

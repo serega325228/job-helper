@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import UTC, datetime
+from uuid import UUID
 
 from pydantic import ValidationError
 
@@ -13,6 +14,7 @@ from src.ports.vacancy_source import VacancySource
 from src.schemas.vacancy import (
     NormalizedVacancy,
     RawVacancy,
+    VacancyHardFilters,
     VacancyReference,
     VacancySearchQuery,
 )
@@ -94,6 +96,43 @@ class VacancyService:
 
         return references
 
+    async def list_by_hard_filters(
+        self,
+        filters: VacancyHardFilters,
+        *,
+        limit: int = 100,
+    ) -> list[Vacancy]:
+        if limit < 1:
+            raise ValueError("limit must be greater than zero")
+
+        async with self._uow as uow:
+            return await uow.vacancies.list_by_hard_filters(
+                filters,
+                limit=limit,
+            )
+
+    async def ids_by_hard_filters(
+        self,
+        filters: VacancyHardFilters,
+        *,
+        limit: int = 100,
+    ) -> list[UUID]:
+        if limit < 1:
+            raise ValueError("limit must be greater than zero")
+
+        async with self._uow as uow:
+            return await uow.vacancies.ids_by_hard_filters(
+                filters,
+                limit=limit,
+            )
+
+    async def get_vacancies_by_ids(
+        self,
+        vacancy_ids: list[UUID],
+    ) -> list[Vacancy]:
+        async with self._uow as uow:
+            return await uow.vacancies.get_vacancies_by_ids(vacancy_ids)
+
     async def fetch_vacancies(
         self,
         source: VacancySource,
@@ -167,16 +206,14 @@ class VacancyService:
     ) -> list[NormalizedVacancy]:
         raw_ids = {(vacancy.source, vacancy.external_id) for vacancy in raw}
         normalized_ids = {
-            (vacancy.source, vacancy.external_id)
-            for vacancy in normalized
+            (vacancy.source, vacancy.external_id) for vacancy in normalized
         }
 
         missing = raw_ids - normalized_ids
         unexpected = normalized_ids - raw_ids
         if missing or unexpected:
             raise VacancyNormalizationError(
-                "Invalid batch mapping: "
-                f"missing={missing}, unexpected={unexpected}",
+                f"Invalid batch mapping: missing={missing}, unexpected={unexpected}",
             )
         if len(normalized_ids) != len(normalized):
             raise VacancyNormalizationError(
@@ -191,12 +228,10 @@ class VacancyService:
         normalized_vacancies: list[NormalizedVacancy],
     ) -> list[Vacancy]:
         raw_by_key = {
-            (vacancy.source, vacancy.external_id): vacancy
-            for vacancy in raw_vacancies
+            (vacancy.source, vacancy.external_id): vacancy for vacancy in raw_vacancies
         }
         keys = {
-            (vacancy.source, vacancy.external_id)
-            for vacancy in normalized_vacancies
+            (vacancy.source, vacancy.external_id) for vacancy in normalized_vacancies
         }
 
         if missing_raw := keys - raw_by_key.keys():
@@ -212,8 +247,7 @@ class VacancyService:
         async with self._uow as uow:
             existing = await uow.vacancies.get_by_external_keys(keys)
             existing_by_key = {
-                (vacancy.source, vacancy.external_id): vacancy
-                for vacancy in existing
+                (vacancy.source, vacancy.external_id): vacancy for vacancy in existing
             }
 
             saved: list[Vacancy] = []
@@ -295,8 +329,7 @@ class VacancyService:
             return {}
 
         titles = [
-            raw_by_key[(vacancy.source, vacancy.external_id)].title
-            or vacancy.title
+            raw_by_key[(vacancy.source, vacancy.external_id)].title or vacancy.title
             for vacancy in normalized_vacancies
         ]
         content_documents = [
