@@ -19,6 +19,9 @@ class VacancyMatchRepository:
     def add(self, vacancy_match: VacancyMatch) -> None:
         self._session.add(vacancy_match)
 
+    def add_all(self, vacancy_matches: list[VacancyMatch]) -> None:
+        self._session.add_all(vacancy_matches)
+
     async def get_by_id(self, match_id: UUID) -> VacancyMatch | None:
         return await self._session.get(VacancyMatch, match_id)
 
@@ -32,6 +35,21 @@ class VacancyMatchRepository:
             VacancyMatch.vacancy_id == vacancy_id,
         )
         return await self._session.scalar(statement)
+
+    async def get_by_profile_and_vacancy_ids(
+        self,
+        profile_id: UUID,
+        vacancy_ids: list[UUID],
+    ) -> list[VacancyMatch]:
+        if not vacancy_ids:
+            return []
+
+        statement = select(VacancyMatch).where(
+            VacancyMatch.profile_id == profile_id,
+            VacancyMatch.vacancy_id.in_(vacancy_ids),
+        )
+        result = await self._session.scalars(statement)
+        return list(result)
 
     async def list_for_profile(
         self,

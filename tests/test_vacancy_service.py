@@ -188,7 +188,6 @@ class VacancyServiceTests(unittest.IsolatedAsyncioTestCase):
             ["Go", "PostgreSQL"],
         )
         self.assertEqual(first[0].raw_payload["id"], "42")
-        self.assertEqual(first[0].embedding_model, "fake-embedding")
         self.assertIsNotNone(first[0].content_embedding)
         self.assertIsNotNone(first[0].title_embedding)
         self.assertEqual(client.details_calls, ["42", "42"])

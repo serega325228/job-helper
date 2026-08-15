@@ -169,7 +169,6 @@ class ScoringServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(preference.title_embedding, [1.0, 0.0])
         self.assertEqual(preference.content_embedding, [1.0, 1.0])
-        self.assertEqual(preference.embedding_model, "fake-embedding")
 
 
 if __name__ == "__main__":

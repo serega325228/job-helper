@@ -1,6 +1,8 @@
+import math
 import unittest
 from uuid import uuid4
 
+from src.schemas.scoring import PreferenceComparison, ProfileComparison
 from src.schemas.vacancy import VacancyHardFilters
 from src.schemas.vacancy_match import MatchCategory, VacancyMatchResult
 from src.services.vacancy_match import VacancyMatchService
@@ -8,20 +10,31 @@ from src.services.vacancy_match import VacancyMatchService
 
 class FakeVacancyMatchRepository:
     def __init__(self) -> None:
-        self.item = None
+        self.items = []
         self.search_calls = []
 
     async def get_by_profile_and_vacancy(self, profile_id, vacancy_id):
-        if (
-            self.item is not None
-            and self.item.profile_id == profile_id
-            and self.item.vacancy_id == vacancy_id
-        ):
-            return self.item
-        return None
+        return next(
+            (
+                item
+                for item in self.items
+                if item.profile_id == profile_id and item.vacancy_id == vacancy_id
+            ),
+            None,
+        )
+
+    async def get_by_profile_and_vacancy_ids(self, profile_id, vacancy_ids):
+        return [
+            item
+            for item in self.items
+            if item.profile_id == profile_id and item.vacancy_id in vacancy_ids
+        ]
 
     def add(self, vacancy_match) -> None:
-        self.item = vacancy_match
+        self.items.append(vacancy_match)
+
+    def add_all(self, vacancy_matches) -> None:
+        self.items.extend(vacancy_matches)
 
     async def search_by_preferences(
         self,
@@ -36,6 +49,7 @@ class FakeVacancyMatchRepository:
 class FakeUnitOfWork:
     def __init__(self) -> None:
         self.vacancy_matches = FakeVacancyMatchRepository()
+        self.flush_calls = 0
 
     async def __aenter__(self):
         return self
@@ -44,10 +58,39 @@ class FakeUnitOfWork:
         return None
 
     async def flush(self) -> None:
-        return None
+        self.flush_calls += 1
 
 
 class VacancyMatchServiceTests(unittest.IsolatedAsyncioTestCase):
+    def test_builds_final_result_with_geometric_score(self) -> None:
+        service = VacancyMatchService(FakeUnitOfWork())
+        result = service.build_result(
+            profile_id=uuid4(),
+            vacancy_id=uuid4(),
+            preference_intent_id=uuid4(),
+            profile_comparison=ProfileComparison(
+                score=0.7,
+                matched_skills=["python"],
+                missing_skills=["redis"],
+            ),
+            preference_comparison=PreferenceComparison(
+                score=0.8,
+                hard_constraints_passed=True,
+            ),
+            profile_rerank_score=0.9,
+            preference_rerank_score=0.85,
+            title_similarity=0.95,
+            content_similarity=0.75,
+            embedding_similarity=0.83,
+        )
+
+        expected_score = math.prod((0.7**0.2, 0.8**0.2, 0.9**0.3, 0.85**0.3))
+        self.assertAlmostEqual(result.total_score, expected_score)
+        self.assertEqual(result.category, MatchCategory.TARGET)
+        self.assertEqual(result.matched_skills, ["python"])
+        self.assertEqual(result.missing_skills, ["redis"])
+        self.assertEqual(result.component_scores["semantic"]["combined"], 0.83)
+
     async def test_searches_with_hard_filters_in_same_repository_call(self) -> None:
         unit_of_work = FakeUnitOfWork()
         service = VacancyMatchService(unit_of_work)
@@ -109,6 +152,30 @@ class VacancyMatchServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated.preference_intent_id, second_intent_id)
         self.assertEqual(updated.total_score, 0.9)
         self.assertEqual(updated.category, MatchCategory.TARGET.value)
+        self.assertEqual(unit_of_work.flush_calls, 2)
+
+    async def test_saves_multiple_results_in_one_unit_of_work(self) -> None:
+        unit_of_work = FakeUnitOfWork()
+        service = VacancyMatchService(unit_of_work)
+        profile_id = uuid4()
+        results = [
+            VacancyMatchResult(
+                profile_id=profile_id,
+                vacancy_id=uuid4(),
+                preference_intent_id=uuid4(),
+                structured_profile_score=0.7,
+                structured_preference_score=0.8,
+                total_score=total_score,
+                category=MatchCategory.STRETCH,
+            )
+            for total_score in (0.75, 0.70)
+        ]
+
+        saved = await service.save_results(results)
+
+        self.assertEqual(len(saved), 2)
+        self.assertEqual(len(unit_of_work.vacancy_matches.items), 2)
+        self.assertEqual(unit_of_work.flush_calls, 1)
 
 
 if __name__ == "__main__":

@@ -313,8 +313,6 @@ class VacancyService:
             "raw_payload": raw.raw_payload,
             "content_embedding": content_embedding,
             "title_embedding": title_embedding,
-            "embedding_model": self._embedding.model_name,
-            "normalizer_version": self.NORMALIZER_VERSION,
             "status": "active",
             "published_at": raw.published_at,
             "last_seen_at": seen_at,

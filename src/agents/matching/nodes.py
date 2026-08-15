@@ -2,11 +2,10 @@ from uuid import UUID
 
 from langgraph.runtime import Runtime
 
+from src.agents.matching.helpers import load_candidate_entities
 from src.agents.matching.schemas import MatchingCandidate
 from src.agents.matching.state import MatchingContext, MatchingState
 from src.exceptions.profile import ProfileNotFoundError
-from src.infrastructure.models.preference_intent import PreferenceIntent
-from src.infrastructure.models.vacancy import Vacancy
 
 
 async def search_candidates(
@@ -45,7 +44,7 @@ async def compare_candidates(
     if profile is None:
         raise ProfileNotFoundError(state.profile_id)
 
-    vacancies, preferences = await _load_candidate_entities(state, runtime)
+    vacancies, preferences = await load_candidate_entities(state, runtime.context)
     ranked: list[tuple[UUID, MatchingCandidate]] = []
     for vacancy_id, candidate in state.candidates.items():
         vacancy = vacancies[vacancy_id]
@@ -61,7 +60,7 @@ async def compare_candidates(
         if not preference_comparison.hard_constraints_passed:
             continue
 
-        structured_score = _geometric_score(
+        structured_score = runtime.context.matching_service.geometric_score(
             profile_comparison.score,
             preference_comparison.score,
             first_weight=0.45,
@@ -97,7 +96,7 @@ async def rerank_candidates(
     if profile is None:
         raise ProfileNotFoundError(state.profile_id)
 
-    vacancies, preferences = await _load_candidate_entities(state, runtime)
+    vacancies, preferences = await load_candidate_entities(state, runtime.context)
     rerank_scores = await runtime.context.scoring_service.rerank_vacancies(
         profile,
         list(vacancies.values()),
@@ -120,45 +119,26 @@ async def rerank_candidates(
         },
     }
 
-#remove ts out of here
-async def _load_candidate_entities(
+
+async def save_matches(
     state: MatchingState,
     runtime: Runtime[MatchingContext],
-) -> tuple[dict[UUID, Vacancy], dict[UUID, PreferenceIntent]]:
-    vacancies = {
-        vacancy.id: vacancy
-        for vacancy in await runtime.context.vacancy_service.get_vacancies_by_ids(
-            list(state.candidates),
+) -> dict:
+    results = [
+        runtime.context.matching_service.build_result(
+            profile_id=state.profile_id,
+            vacancy_id=vacancy_id,
+            preference_intent_id=candidate.preference_id,
+            profile_comparison=candidate.profile_comparison,
+            preference_comparison=candidate.preference_comparison,
+            profile_rerank_score=candidate.profile_rerank_score,
+            preference_rerank_score=candidate.preference_rerank_score,
+            title_similarity=candidate.title_similarity,
+            content_similarity=candidate.content_similarity,
+            embedding_similarity=candidate.embedding_similarity,
         )
-    }
-    preference_ids = list(
-        {candidate.preference_id for candidate in state.candidates.values()},
-    )
-    preferences = {
-        preference.id: preference
-        for preference in await runtime.context.profile_service.get_preferences_by_ids(
-            state.profile_id,
-            preference_ids,
-        )
-    }
-
-    missing_vacancies = state.candidates.keys() - vacancies.keys()
-    missing_preferences = set(preference_ids) - preferences.keys()
-    if missing_vacancies or missing_preferences:
-        raise RuntimeError(
-            "Candidate entities are missing: "
-            f"vacancies={sorted(map(str, missing_vacancies))}, "
-            f"preferences={sorted(map(str, missing_preferences))}",
-        )
-    return vacancies, preferences
-
-
-def _geometric_score(
-    first: float,
-    second: float,
-    *,
-    first_weight: float,
-) -> float:
-    if first <= 0 or second <= 0:
-        return 0.0
-    return first**first_weight * second ** (1 - first_weight)
+        for vacancy_id, candidate in state.candidates.items()
+    ]
+    results.sort(key=lambda result: result.total_score, reverse=True)
+    saved_matches = await runtime.context.matching_service.save_results(results)
+    return {"vacancy_match_ids": [vacancy_match.id for vacancy_match in saved_matches]}
