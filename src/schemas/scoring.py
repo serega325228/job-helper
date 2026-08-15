@@ -16,3 +16,10 @@ class PreferenceComparison(BaseModel):
     score: float = Field(ge=0, le=1)
     hard_constraints_passed: bool
     components: dict[str, float] = Field(default_factory=dict)
+
+
+class VacancyRerankScores(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    profile_score: float = Field(ge=0, le=1)
+    preference_score: float = Field(ge=0, le=1)

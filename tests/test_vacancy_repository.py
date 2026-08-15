@@ -1,7 +1,6 @@
 import unittest
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, Mock
-from uuid import uuid4
+from unittest.mock import AsyncMock
 
 from sqlalchemy.dialects import postgresql
 
@@ -10,73 +9,6 @@ from src.schemas.vacancy import VacancyHardFilters
 
 
 class VacancyRepositoryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_searches_title_and_content_embeddings(self) -> None:
-        vacancy_id = uuid4()
-        query_result = Mock()
-        query_result.mappings.return_value = [
-            {
-                "vacancy_id": vacancy_id,
-                "title_similarity": 0.9,
-                "content_similarity": 0.7,
-                "combined_similarity": 0.82,
-            },
-        ]
-        session = AsyncMock()
-        session.execute.return_value = query_result
-        repository = VacancyRepository(session)
-
-        result = await repository.search_by_embeddings(
-            [1.0, 0.0],
-            [0.0, 1.0],
-            vacancy_ids=[vacancy_id],
-            title_weight=0.6,
-            limit=10,
-            candidate_limit=40,
-        )
-
-        self.assertEqual(result[0].vacancy_id, vacancy_id)
-        self.assertEqual(result[0].combined_similarity, 0.82)
-        statement = session.execute.await_args.args[0]
-        sql = str(statement.compile(dialect=postgresql.dialect()))
-        self.assertIn("vacancies.title_embedding <=>", sql)
-        self.assertIn("vacancies.content_embedding <=>", sql)
-        self.assertIn("vacancies.id IN", sql)
-        self.assertIn("UNION", sql)
-        self.assertIn("embedding_candidates", sql)
-        self.assertGreaterEqual(sql.count("ORDER BY"), 3)
-
-    async def test_embedding_search_skips_query_for_empty_candidate_ids(self) -> None:
-        session = AsyncMock()
-        repository = VacancyRepository(session)
-
-        result = await repository.search_by_embeddings(
-            [1.0, 0.0],
-            [0.0, 1.0],
-            vacancy_ids=[],
-        )
-
-        self.assertEqual(result, [])
-        session.execute.assert_not_awaited()
-
-    async def test_embedding_search_validates_parameters(self) -> None:
-        repository = VacancyRepository(AsyncMock())
-
-        with self.assertRaises(ValueError):
-            await repository.search_by_embeddings([], [1.0], limit=10)
-        with self.assertRaises(ValueError):
-            await repository.search_by_embeddings(
-                [1.0],
-                [1.0],
-                title_weight=1.1,
-            )
-        with self.assertRaises(ValueError):
-            await repository.search_by_embeddings(
-                [1.0],
-                [1.0],
-                limit=10,
-                candidate_limit=9,
-            )
-
     async def test_builds_query_from_hard_filters(self) -> None:
         expected = object()
         session = AsyncMock()

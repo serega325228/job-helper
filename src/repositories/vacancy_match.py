@@ -1,13 +1,15 @@
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, true, union
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.functions import func
 
-from infrastructure.models.preference_intent import PreferenceIntent
-from infrastructure.models.vacancy import Vacancy
-from schemas.vacancy_match import VacancyEmbeddingSearchResult
+from src.infrastructure.models.preference_intent import PreferenceIntent
+from src.infrastructure.models.vacancy import Vacancy
 from src.infrastructure.models.vacancy_match import VacancyMatch
+from src.repositories.vacancy_filters import build_vacancy_hard_filter_conditions
+from src.schemas.vacancy import VacancyHardFilters
+from src.schemas.vacancy_match import VacancyEmbeddingSearchResult
 
 
 class VacancyMatchRepository:
@@ -46,85 +48,112 @@ class VacancyMatchRepository:
         result = await self._session.scalars(statement)
         return list(result)
 
-    #fix distance/similarity and add hard filters to this query
     async def search_by_preferences(
-            self,
-            profile_id: UUID,
-            vacancy_ids: list[UUID],
-            limit: int = 100,
-            title_weight: float = 0.4,
-        ) -> list[VacancyEmbeddingSearchResult]:
-            if not 0 <= title_weight <= 1:
-                raise ValueError("title_weight must be between zero and one")
-            if limit < 1:
-                raise ValueError("limit must be greater than zero")
-            if vacancy_ids == []:
-                return []
+        self,
+        profile_id: UUID,
+        hard_filters: VacancyHardFilters,
+        *,
+        limit: int = 100,
+        title_weight: float = 0.4,
+        candidate_limit: int = 100,
+        per_preference_limit: int = 50,
+    ) -> list[VacancyEmbeddingSearchResult]:
+        if not 0 <= title_weight <= 1:
+            raise ValueError("title_weight must be between zero and one")
+        if limit < 1:
+            raise ValueError("limit must be greater than zero")
+        if candidate_limit < 1:
+            raise ValueError("candidate_limit must be greater than zero")
+        if per_preference_limit < 1:
+            raise ValueError("per_preference_limit must be greater than zero")
 
-            title_distance = (
-                Vacancy.title_embedding.cosine_distance(
-                    PreferenceIntent.title_embedding
-                )
+        title_distance = Vacancy.title_embedding.cosine_distance(
+            PreferenceIntent.title_embedding,
+        )
+        content_distance = Vacancy.content_embedding.cosine_distance(
+            PreferenceIntent.content_embedding,
+        )
+        content_weight = 1 - title_weight
+        combined_distance = (
+            title_distance * title_weight + content_distance * content_weight
+        )
+        vacancy_conditions = [
+            *build_vacancy_hard_filter_conditions(hard_filters),
+            Vacancy.title_embedding.is_not(None),
+            Vacancy.content_embedding.is_not(None),
+        ]
+
+        title_candidates = (
+            select(Vacancy.id.label("vacancy_id"))
+            .where(*vacancy_conditions)
+            .order_by(title_distance)
+            .limit(candidate_limit)
+            .correlate(PreferenceIntent)
+        )
+        content_candidates = (
+            select(Vacancy.id.label("vacancy_id"))
+            .where(*vacancy_conditions)
+            .order_by(content_distance)
+            .limit(candidate_limit)
+            .correlate(PreferenceIntent)
+        )
+        candidates = union(title_candidates, content_candidates).subquery(
+            "candidates",
+        )
+
+        nearest_neighbors = (
+            select(
+                Vacancy.id.label("vacancy_id"),
+                (1 - title_distance).label("title_similarity"),
+                (1 - content_distance).label("content_similarity"),
+                combined_distance.label("distance"),
             )
-
-            content_distance = (
-                Vacancy.content_embedding.cosine_distance(
-                    PreferenceIntent.content_embedding
-                )
+            .join(candidates, Vacancy.id == candidates.c.vacancy_id)
+            .order_by(combined_distance)
+            .limit(per_preference_limit)
+            .correlate(PreferenceIntent)
+            .lateral("nn")
+        )
+        semantic_candidates = (
+            select(
+                PreferenceIntent.id.label("preference_id"),
+                nearest_neighbors.c.vacancy_id,
+                nearest_neighbors.c.title_similarity,
+                nearest_neighbors.c.content_similarity,
+                nearest_neighbors.c.distance,
             )
-
-            content_weight = 1 - title_weight
-            combined_distance = (
-                title_distance * title_weight
-                + content_distance * content_weight
+            .join(nearest_neighbors, true())
+            .where(
+                PreferenceIntent.profile_id == profile_id,
+                PreferenceIntent.enabled.is_(True),
+                PreferenceIntent.title_embedding.is_not(None),
+                PreferenceIntent.content_embedding.is_not(None),
             )
-
-            rank = func.row_number().over(
-                partition_by=Vacancy.id,
-                order_by=combined_distance.asc(),
-            ).label("rank")
-
-            scored = (
-                select(
-                    Vacancy.id.label("vacancy_id"),
-                    PreferenceIntent.id.label("preference_id"),
-
-                    title_distance.label("title_distance"),
-                    content_distance.label("content_distance"),
-                    combined_distance.label("combined_distance"),
-
-                    rank,
-                )
-                .join(PreferenceIntent, true())
-                .where(
-                    Vacancy.id.in_(vacancy_ids),
-
-                    PreferenceIntent.profile_id == profile_id,
-                    PreferenceIntent.enabled.is_(True),
-
-                    Vacancy.title_embedding.is_not(None),
-                    Vacancy.content_embedding.is_not(None),
-                    PreferenceIntent.title_embedding.is_not(None),
-                    PreferenceIntent.content_embedding.is_not(None),
-                )
-                .cte("scored")
+            .cte("semantic_candidates")
+        )
+        rank = (
+            func.row_number()
+            .over(
+                partition_by=semantic_candidates.c.vacancy_id,
+                order_by=semantic_candidates.c.distance,
             )
-
-            stmt = (
-                select(
-                    scored.c.vacancy_id,
-                    scored.c.preference_id,
-                    scored.c.title_distance,
-                    scored.c.content_distance,
-                    scored.c.combined_distance,
-                )
-                .where(scored.c.rank == 1)
-                .order_by(scored.c.combined_distance.asc())
-                .limit(limit)
+            .label("rank")
+        )
+        best_match = select(semantic_candidates, rank).cte("best_match")
+        statement = (
+            select(
+                best_match.c.vacancy_id,
+                best_match.c.preference_id,
+                best_match.c.title_similarity,
+                best_match.c.content_similarity,
+                (1 - best_match.c.distance).label("combined_similarity"),
             )
-
-            result = await self._session.execute(stmt)
-            return [
-                VacancyEmbeddingSearchResult.model_validate(row)
-                for row in result.mappings()
-            ]
+            .where(best_match.c.rank == 1)
+            .order_by(best_match.c.distance)
+            .limit(limit)
+        )
+        result = await self._session.execute(statement)
+        return [
+            VacancyEmbeddingSearchResult.model_validate(row)
+            for row in result.mappings()
+        ]

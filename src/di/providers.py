@@ -83,9 +83,7 @@ class InfrastructureProvider(Provider):
             http_client=http_client,
             user_agent=settings.hh.user_agent,
             access_token=(
-                access_token.get_secret_value()
-                if access_token is not None
-                else None
+                access_token.get_secret_value() if access_token is not None else None
             ),
         )
 
@@ -130,13 +128,11 @@ class ServiceProvider(Provider):
         reranker: VacancyReranker,
         embedding_service: EmbeddingService,
         skill_canonicalizer: SkillCanonicalizer,
-        settings: Settings,
     ) -> ScoringService:
         return ScoringService(
             reranker,
             embedding_service,
             skill_canonicalizer,
-            rerank_limit=settings.reranker.candidate_limit,
         )
 
     @provide(scope=Scope.APP)

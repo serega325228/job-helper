@@ -9,9 +9,12 @@ from src.infrastructure.models.preference_intent import PreferenceIntent
 from src.infrastructure.models.profile import Profile
 from src.infrastructure.models.vacancy import Vacancy
 from src.infrastructure.reranker.vacancy_reranker import VacancyReranker
-from src.schemas.scoring import PreferenceComparison, ProfileComparison
+from src.schemas.scoring import (
+    PreferenceComparison,
+    ProfileComparison,
+    VacancyRerankScores,
+)
 from src.schemas.vacancy import VacancySoftConditions
-from src.schemas.vacancy_match import MatchCategory, VacancyMatchResult
 from src.services.embedding import EmbeddingService
 from src.services.embedding_text import (
     build_preference_search_text,
@@ -66,14 +69,10 @@ class ScoringService:
         reranker: VacancyReranker,
         embedding_service: EmbeddingService,
         skill_canonicalizer: SkillCanonicalizer,
-        rerank_limit: int = 40,
     ) -> None:
-        if rerank_limit < 1:
-            raise ValueError("rerank_limit must be greater than zero")
         self._reranker = reranker
         self._embedding = embedding_service
         self._skills = skill_canonicalizer
-        self._rerank_limit = rerank_limit
 
     async def update_preference_embeddings(
         self,
@@ -288,85 +287,61 @@ class ScoringService:
         best_preference = max(valid.keys(), key=selection_score)
         return (best_preference, valid[best_preference])
 
-    async def score(
+    async def rerank_vacancies(
         self,
-        vacancies: list[Vacancy],
         profile: Profile,
-        preferences: list[PreferenceIntent],
-    ) -> list[VacancyMatchResult]:
+        vacancies: list[Vacancy],
+        preferences_by_vacancy: dict[UUID, PreferenceIntent],
+    ) -> dict[UUID, VacancyRerankScores]:
         if not vacancies:
-            return []
+            return {}
 
-        profile_preferences = [
-            preference
-            for preference in preferences
-            if preference.profile_id == profile.id
-        ]
-
-        candidates = []
-        for vacancy in vacancies:
-            preference = self.select_preference(vacancy, profile_preferences)
-            profile_comparison = self.compare_profile(profile, vacancy)
-            preference_comparison = self.compare_preference(preference, vacancy)
-            if not preference_comparison.hard_constraints_passed:
-                continue
-
-            structured_score = self._geometric_score(
-                profile_comparison.score,
-                preference_comparison.score,
-                first_weight=0.45,
-            )
-            candidates.append(
-                (
-                    vacancy,
-                    preference,
-                    profile_comparison,
-                    preference_comparison,
-                    structured_score,
-                ),
+        missing_preference_ids = {
+            vacancy.id
+            for vacancy in vacancies
+            if vacancy.id not in preferences_by_vacancy
+        }
+        if missing_preference_ids:
+            raise ValueError(
+                "Preferences are missing for vacancies: "
+                f"{sorted(map(str, missing_preference_ids))}",
             )
 
-        candidates.sort(key=lambda item: item[4], reverse=True)
-        candidates = candidates[: self._rerank_limit]
-        if not candidates:
-            return []
-
-        documents = [build_vacancy_search_text(item[0]) for item in candidates]
-        profile_scores = await self._reranker.score(
-            build_profile_search_text(profile),
-            documents,
+        documents = [build_vacancy_search_text(vacancy) for vacancy in vacancies]
+        profile_scores, preference_scores = await asyncio.gather(
+            self._reranker.score(build_profile_search_text(profile), documents),
+            self._rerank_preferences(
+                vacancies,
+                preferences_by_vacancy,
+                documents,
+            ),
         )
-        preference_scores = await self._rerank_preferences(candidates, documents)
-
-        results = [
-            self._build_result(
-                profile,
-                candidate,
-                profile_rerank_score,
-                preference_rerank_score,
+        return {
+            vacancy.id: VacancyRerankScores(
+                profile_score=profile_score,
+                preference_score=preference_scores[vacancy.id],
             )
-            for candidate, profile_rerank_score, preference_rerank_score in zip(
-                candidates,
+            for vacancy, profile_score in zip(
+                vacancies,
                 profile_scores,
-                preference_scores,
                 strict=True,
             )
-        ]
-        return sorted(results, key=lambda result: result.total_score, reverse=True)
+        }
 
     async def _rerank_preferences(
         self,
-        candidates: list[tuple],
+        vacancies: list[Vacancy],
+        preferences_by_vacancy: dict[UUID, PreferenceIntent],
         documents: list[str],
-    ) -> list[float]:
+    ) -> dict[UUID, float]:
         groups: dict[UUID, list[int]] = defaultdict(list)
         preferences: dict[UUID, PreferenceIntent] = {}
-        for index, candidate in enumerate(candidates):
-            preference = candidate[1]
+        for index, vacancy in enumerate(vacancies):
+            preference = preferences_by_vacancy[vacancy.id]
             groups[preference.id].append(index)
             preferences[preference.id] = preference
 
-        scores = [0.0] * len(candidates)
+        scores: dict[UUID, float] = {}
 
         async def score_group(preference_id: UUID, indexes: list[int]) -> None:
             group_scores = await self._reranker.score(
@@ -374,7 +349,7 @@ class ScoringService:
                 [documents[index] for index in indexes],
             )
             for index, score in zip(indexes, group_scores, strict=True):
-                scores[index] = score
+                scores[vacancies[index].id] = score
 
         await asyncio.gather(
             *(
@@ -383,59 +358,6 @@ class ScoringService:
             ),
         )
         return scores
-
-    def _build_result(
-        self,
-        profile: Profile,
-        candidate: tuple,
-        profile_rerank_score: float,
-        preference_rerank_score: float,
-    ) -> VacancyMatchResult:
-        vacancy, preference, profile_comparison, preference_comparison, _ = candidate
-        profile_fit = self._geometric_score(
-            profile_comparison.score,
-            profile_rerank_score,
-            first_weight=0.55,
-        )
-        preference_fit = self._geometric_score(
-            preference_comparison.score,
-            preference_rerank_score,
-            first_weight=0.55,
-        )
-        total_score = self._geometric_score(
-            profile_fit,
-            preference_fit,
-            first_weight=0.45,
-        )
-
-        return VacancyMatchResult(
-            profile_id=profile.id,
-            vacancy_id=vacancy.id,
-            preference_intent_id=preference.id,
-            structured_profile_score=profile_comparison.score,
-            structured_preference_score=preference_comparison.score,
-            profile_rerank_score=profile_rerank_score,
-            preference_rerank_score=preference_rerank_score,
-            total_score=total_score,
-            category=self._classify(total_score),
-            component_scores={
-                "profile": profile_comparison.components,
-                "preference": preference_comparison.components,
-                "intent_semantic": {
-                    "title": self._cosine_similarity(
-                        preference.title_embedding,
-                        vacancy.title_embedding,
-                    ),
-                    "content": self._cosine_similarity(
-                        preference.content_embedding,
-                        vacancy.content_embedding,
-                    ),
-                },
-            },
-            matched_skills=profile_comparison.matched_skills,
-            missing_skills=profile_comparison.missing_skills,
-            reranker_model=self._reranker.model_name,
-        )
 
     @staticmethod
     def _weighted_average(
@@ -449,17 +371,6 @@ class ScoringService:
             sum(components[name] * weights[name] for name in components)
             / available_weight
         )
-
-    @staticmethod
-    def _geometric_score(
-        first: float,
-        second: float,
-        *,
-        first_weight: float,
-    ) -> float:
-        if first <= 0 or second <= 0:
-            return 0.0
-        return first**first_weight * second ** (1 - first_weight)
 
     @staticmethod
     def _ratio_score(actual: float, required: float) -> float:
@@ -568,13 +479,3 @@ class ScoringService:
             first_norm * second_norm
         )
         return min(1.0, max(0.0, cosine))
-
-    @staticmethod
-    def _classify(score: float) -> MatchCategory:
-        if score >= 0.75:
-            return MatchCategory.TARGET
-        if score >= 0.55:
-            return MatchCategory.STRETCH
-        if score >= 0.35:
-            return MatchCategory.FALLBACK
-        return MatchCategory.REJECT

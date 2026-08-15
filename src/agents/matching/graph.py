@@ -1,22 +1,27 @@
-
-from agents.matching.state import MatchingState
 from langgraph.constants import END, START
 from langgraph.graph.state import CompiledStateGraph, StateGraph
 
+from src.agents.matching.nodes import (
+    compare_candidates,
+    rerank_candidates,
+    search_candidates,
+)
+from src.agents.matching.state import MatchingContext, MatchingState
 
-def create_match_workflow(
-    models,
-    tools
-) -> CompiledStateGraph:
-    graph = StateGraph(MatchingState)
 
-    graph.add_node("collect", collect_raw_vacancies)
-    graph.add_node("normalize", normalize_vacancies)
-    graph.add_node("save", save_vacancies)
+def create_matching_graph() -> CompiledStateGraph:
+    graph = StateGraph(MatchingState, context_schema=MatchingContext)
 
-    graph.add_edge(START, "collect")
-    graph.add_edge("collect", "normalize")
-    graph.add_edge("normalize", "save")
-    graph.add_edge("save", END)
+    graph.add_node("search_candidates", search_candidates)
+    graph.add_node("compare_candidates", compare_candidates)
+    graph.add_node("rerank_candidates", rerank_candidates)
+
+    graph.add_edge(START, "search_candidates")
+    graph.add_edge("search_candidates", "compare_candidates")
+    graph.add_edge("compare_candidates", "rerank_candidates")
+    graph.add_edge("rerank_candidates", END)
 
     return graph.compile()
+
+
+create_match_workflow = create_matching_graph

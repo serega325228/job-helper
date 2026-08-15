@@ -143,19 +143,20 @@ class ScoringServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(comparison.components["location"], 1.0)
         self.assertGreater(comparison.score, 0.8)
 
-    async def test_pipeline_returns_final_match_result(self) -> None:
+    async def test_reranks_profile_and_preference_separately(self) -> None:
         profile = make_profile()
         vacancy = make_vacancy()
         preference = make_preference(profile.id)
 
-        results = await self.service.score([vacancy], profile, [preference])
+        results = await self.service.rerank_vacancies(
+            profile,
+            [vacancy],
+            {vacancy.id: preference},
+        )
 
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].profile_id, profile.id)
-        self.assertEqual(results[0].vacancy_id, vacancy.id)
-        self.assertEqual(results[0].preference_intent_id, preference.id)
-        self.assertGreater(results[0].total_score, 0.7)
-        self.assertEqual(results[0].reranker_model, "fake-reranker")
+        self.assertEqual(results[vacancy.id].profile_score, 0.8)
+        self.assertEqual(results[vacancy.id].preference_score, 0.8)
 
     async def test_preference_embedding_builder_sets_both_vectors(self) -> None:
         profile = make_profile()

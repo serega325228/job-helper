@@ -1,6 +1,7 @@
 import unittest
 from uuid import uuid4
 
+from src.schemas.vacancy import VacancyHardFilters
 from src.schemas.vacancy_match import MatchCategory, VacancyMatchResult
 from src.services.vacancy_match import VacancyMatchService
 
@@ -8,6 +9,7 @@ from src.services.vacancy_match import VacancyMatchService
 class FakeVacancyMatchRepository:
     def __init__(self) -> None:
         self.item = None
+        self.search_calls = []
 
     async def get_by_profile_and_vacancy(self, profile_id, vacancy_id):
         if (
@@ -20,6 +22,15 @@ class FakeVacancyMatchRepository:
 
     def add(self, vacancy_match) -> None:
         self.item = vacancy_match
+
+    async def search_by_preferences(
+        self,
+        profile_id,
+        hard_filters,
+        **kwargs,
+    ):
+        self.search_calls.append((profile_id, hard_filters, kwargs))
+        return []
 
 
 class FakeUnitOfWork:
@@ -37,6 +48,36 @@ class FakeUnitOfWork:
 
 
 class VacancyMatchServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_searches_with_hard_filters_in_same_repository_call(self) -> None:
+        unit_of_work = FakeUnitOfWork()
+        service = VacancyMatchService(unit_of_work)
+        profile_id = uuid4()
+        filters = VacancyHardFilters(cities=["Москва"])
+
+        result = await service.search_by_preferences(
+            profile_id,
+            filters,
+            limit=50,
+            title_weight=0.4,
+        )
+
+        self.assertEqual(result, [])
+        self.assertEqual(
+            unit_of_work.vacancy_matches.search_calls,
+            [
+                (
+                    profile_id,
+                    filters,
+                    {
+                        "limit": 50,
+                        "title_weight": 0.4,
+                        "candidate_limit": 100,
+                        "per_preference_limit": 50,
+                    },
+                ),
+            ],
+        )
+
     async def test_save_result_upserts_profile_vacancy_match(self) -> None:
         unit_of_work = FakeUnitOfWork()
         service = VacancyMatchService(unit_of_work)

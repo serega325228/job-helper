@@ -24,7 +24,7 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
         service = ProfileService(unit_of_work, AsyncMock())
         profile_id = uuid4()
 
-        result = await service.get_preferences(profile_id)
+        result = await service.get_preferences_by_profile_id(profile_id)
 
         self.assertIs(result, expected)
         unit_of_work.profiles.get_preferences_by_profile_id.assert_awaited_once_with(
