@@ -14,13 +14,23 @@ async def apply_hard_filters(
 
     return {"vacancy_ids_after_hard_filters": vacancies}
 
+#i should mix this 2 steps in 1
 async def embedding_search(
     state: MatchingState,
     runtime: Runtime[MatchingContext]
 ):
-    
+    result = await runtime.context.matching_service.search_by_preferences(
+        state.profile_id,
+        state.vacancy_ids_after_hard_filters,
+        100, #idk where limits should be
+        title_weight=0.4,
+    )
 
-async def compare_vacancy(
+    result = {res.vacancy_id: res for res in result}
+    return {"vacancy_embedding_search_result": result}
+
+
+async def compare_vacancies(
     state: MatchingState,
     runtime: Runtime[MatchingContext]
 ):
@@ -31,22 +41,29 @@ async def compare_vacancy(
     vacancies = await runtime.context.vacancy_service.get_vacancies_by_ids(state.vacancy_ids_after_hard_filters)
     if vacancies is None:
         ...
-
-    preferences = await runtime.context.profile_service.get_preferences(profile.id)
-    if preferences is None:
-        ...
+    #fix ts and make fine state, not that shit
+    preferences = {preference.id: preference
+        for preference in
+            await runtime.context.profile_service.get_preferences_by_ids(
+                profile.id,
+                list([res.preference_id for res in state.vacancy_embedding_search_result.values()])
+            )
+    }
 
     comparisons: dict[UUID, tuple[ProfileComparison, PreferenceComparison]] = {}
     for vacancy in vacancies:
         profile_comparison = runtime.context.scoring_service.compare_profile(profile, vacancy)
-        _, preference_comparison = runtime.context.scoring_service.select_preference(vacancy, preferences)
+        preference_comparison = runtime.context.scoring_service.compare_preference(
+            preferences[state.vacancy_embedding_search_result[vacancy.id].preference_id],
+            vacancy,
+        )
         comparisons[vacancy.id] = (profile_comparison, preference_comparison)
 
     return {"compared_vacancies": comparisons}
 
-async def normalize_vacancies(
-    state: CollectionState,
-    runtime: Runtime[GraphContext]
+async def rerank_vacancies(
+    state: MatchingState,
+    runtime: Runtime[MatchingContext]
 ):
     normalized_vacancies = []
     for offset in range(0, len(state.raw_vacancies), normalization_batch_size):

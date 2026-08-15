@@ -14,6 +14,7 @@ from src.ports.vacancy_source import VacancySource
 from src.schemas.vacancy import (
     NormalizedVacancy,
     RawVacancy,
+    VacancyEmbeddingSearchResult,
     VacancyHardFilters,
     VacancyReference,
     VacancySearchQuery,

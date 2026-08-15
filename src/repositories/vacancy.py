@@ -1,10 +1,13 @@
 from uuid import UUID
 
-from sqlalchemy import func, or_, select, tuple_
+from sqlalchemy import func, or_, select, tuple_, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.models.vacancy import Vacancy
-from src.schemas.vacancy import VacancyHardFilters
+from src.schemas.vacancy import (
+    VacancyEmbeddingSearchResult,
+    VacancyHardFilters,
+)
 
 
 class VacancyRepository:

@@ -12,6 +12,14 @@ class MatchCategory(StrEnum):
     REJECT = "reject"
 
 
+class VacancyEmbeddingSearchResult(BaseModel):
+    vacancy_id: UUID
+    preference_id: UUID
+    title_similarity: float
+    content_similarity: float
+    combined_similarity: float
+
+
 class VacancyMatchResult(BaseModel):
     profile_id: UUID
     vacancy_id: UUID

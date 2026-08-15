@@ -23,10 +23,25 @@ class ProfileRepository:
         self,
         profile_id: UUID,
     ) -> list[PreferenceIntent]:
-        statement = (
+        stmt = (
             select(PreferenceIntent)
             .where(PreferenceIntent.profile_id == profile_id)
             .order_by(PreferenceIntent.created_at, PreferenceIntent.id)
         )
-        result = await self._session.scalars(statement)
+        result = await self._session.scalars(stmt)
+        return list(result)
+
+    async def get_preferences_by_ids(
+        self,
+        profile_id: UUID,
+        preference_ids: list[UUID],
+    ) -> list[PreferenceIntent]:
+        stmt = (
+            select(PreferenceIntent)
+            .where(
+                PreferenceIntent.id.in_(preference_ids),
+                PreferenceIntent.profile_id == profile_id
+            )
+        )
+        result = await self._session.scalars(stmt)
         return list(result)

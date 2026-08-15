@@ -90,6 +90,7 @@ class FakeVacancyRepository:
     def __init__(self) -> None:
         self.items: dict[tuple[str, str], object] = {}
         self.filter_calls: list[tuple[VacancyHardFilters, int]] = []
+        self.embedding_search_calls: list[dict] = []
 
     async def get_by_external_keys(self, keys: set[tuple[str, str]]) -> list:
         return [self.items[key] for key in keys if key in self.items]
@@ -107,6 +108,21 @@ class FakeVacancyRepository:
     ) -> list:
         self.filter_calls.append((filters, limit))
         return list(self.items.values())
+
+    async def search_by_embeddings(
+        self,
+        title_embedding: list[float],
+        content_embedding: list[float],
+        **kwargs,
+    ) -> list:
+        self.embedding_search_calls.append(
+            {
+                "title_embedding": title_embedding,
+                "content_embedding": content_embedding,
+                **kwargs,
+            },
+        )
+        return []
 
 
 class FakeUnitOfWork:
@@ -139,6 +155,38 @@ async def run_inline(function, *args):
 
 
 class VacancyServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_searches_vacancies_by_both_embeddings(self) -> None:
+        unit_of_work = FakeUnitOfWork()
+        service = VacancyService(
+            unit_of_work,
+            FakeNormalizer(),
+            FakeEmbeddingService(),
+        )
+
+        result = await service.search_by_embeddings(
+            [1.0, 0.0],
+            [0.0, 1.0],
+            vacancy_ids=[],
+            title_weight=0.7,
+            limit=30,
+            candidate_limit=120,
+        )
+
+        self.assertEqual(result, [])
+        self.assertEqual(
+            unit_of_work.vacancies.embedding_search_calls,
+            [
+                {
+                    "title_embedding": [1.0, 0.0],
+                    "content_embedding": [0.0, 1.0],
+                    "vacancy_ids": [],
+                    "title_weight": 0.7,
+                    "limit": 30,
+                    "candidate_limit": 120,
+                },
+            ],
+        )
+
     async def test_lists_vacancies_by_hard_filters_through_repository(self) -> None:
         unit_of_work = FakeUnitOfWork()
         service = VacancyService(

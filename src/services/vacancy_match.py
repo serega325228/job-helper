@@ -1,6 +1,8 @@
+from uuid import UUID
+
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.models.vacancy_match import VacancyMatch
-from src.schemas.vacancy_match import VacancyMatchResult
+from src.schemas.vacancy_match import VacancyEmbeddingSearchResult, VacancyMatchResult
 
 
 class VacancyMatchService:
@@ -28,3 +30,18 @@ class VacancyMatchService:
             await uow.flush()
 
         return vacancy_match
+
+    async def search_by_preferences(
+        self,
+        profile_id: UUID,
+        vacancy_ids: list[UUID],
+        limit: int = 100,
+        title_weight: float = 0.4,
+    ) -> list[VacancyEmbeddingSearchResult]:
+        async with self._uow as uow:
+            return await uow.vacancy_matches.search_by_preferences(
+                profile_id,
+                vacancy_ids,
+                limit,
+                title_weight,
+            )
