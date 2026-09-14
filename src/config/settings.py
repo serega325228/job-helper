@@ -38,6 +38,7 @@ class AppSettings(BaseSettings):
 
     host: str = "0.0.0.0"
     port: int = Field(default=8000, ge=1, le=65_535)
+    data_dir: Path = Path(__file__).parent.parent.parent / "data"
 
 
 class DatabaseSettings(BaseSettings):

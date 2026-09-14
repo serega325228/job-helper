@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -13,6 +14,12 @@ if TYPE_CHECKING:
     from src.infrastructure.models.preference_intent import PreferenceIntent
     from src.infrastructure.models.vacancy_match import VacancyMatch
 
+class AnalysisStatus(StrEnum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    FAILED = "failed"
+    COMPLETED = "completed"
+
 
 class Profile(Base):
     __tablename__ = "profiles"
@@ -23,7 +30,7 @@ class Profile(Base):
     profile_summary: Mapped[str | None] = mapped_column(Text)
     analysis_status: Mapped[str] = mapped_column(
         String(30),
-        default="pending",
+        default=AnalysisStatus.PENDING,
         nullable=False,
         index=True,
     )

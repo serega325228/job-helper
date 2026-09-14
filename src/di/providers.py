@@ -4,11 +4,13 @@ import httpx
 from dishka import Provider, Scope, provide
 from langchain.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI
+from services.sercurity import SecurityService
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config.settings import Settings
 from src.infrastructure.db.engine import Database
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
+from src.infrastructure.llm.llm import LLMProvider
 from src.infrastructure.llm.profile_analyzer import ProfileAnalyzer
 from src.infrastructure.llm.vacancy_analyzer import VacancyAnalyzer
 from src.infrastructure.reranker.vacancy_reranker import VacancyReranker
@@ -92,6 +94,7 @@ class InfrastructureProvider(Provider):
         scope=Scope.REQUEST,
     )
     hh_source = provide(HhVacancySource, scope=Scope.APP)
+    llm_provider = provide(LLMProvider, scope=Scope.APP)
     profile_analyzer = provide(ProfileAnalyzer, scope=Scope.APP)
     vacancy_normalizer = provide(
         VacancyAnalyzer,
@@ -121,6 +124,14 @@ class ServiceProvider(Provider):
     profile_service = provide(ProfileService, scope=Scope.REQUEST)
     vacancy_service = provide(VacancyService, scope=Scope.REQUEST)
     vacancy_match_service = provide(VacancyMatchService, scope=Scope.REQUEST)
+    @provide(scope=Scope.APP)
+    def security_service(
+        self,
+        settings: Settings,
+    ) -> SecurityService:
+        return SecurityService(
+            settings.app.data_dir
+        )
 
     @provide(scope=Scope.REQUEST)
     def scoring_service(

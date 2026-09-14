@@ -4,7 +4,7 @@ from src.exceptions.profile import ProfileNotFoundError
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.llm.profile_analyzer import ProfileAnalyzer
 from src.infrastructure.models.preference_intent import PreferenceIntent
-from src.infrastructure.models.profile import Profile
+from src.infrastructure.models.profile import AnalysisStatus, Profile
 
 
 class ProfileService:
@@ -59,12 +59,12 @@ class ProfileService:
                 raise ProfileNotFoundError(profile_id)
 
             raw_story = profile.raw_story
-            profile.analysis_status = "processing"
+            profile.analysis_status = AnalysisStatus.PROCESSING
 
         try:
             result = await self._analyzer.analyze(raw_story)
         except Exception:
-            await self._set_analysis_status(profile_id, "failed")
+            await self._set_analysis_status(profile_id, AnalysisStatus.FAILED)
             raise
 
         async with self._uow as uow:
@@ -88,14 +88,14 @@ class ProfileService:
                     )
                     for intent in result.preference_intents
                 )
-            profile.analysis_status = "completed"
+            profile.analysis_status = AnalysisStatus.COMPLETED
 
         return profile
 
     async def _set_analysis_status(
         self,
         profile_id: UUID,
-        status: str,
+        status: AnalysisStatus,
     ) -> None:
         async with self._uow as uow:
             profile = await uow.profiles.get_by_id(profile_id)

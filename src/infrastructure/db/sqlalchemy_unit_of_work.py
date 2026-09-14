@@ -3,6 +3,7 @@ from typing import Self
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from repositories.resume import ResumeRepository
 from src.repositories.profile import ProfileRepository
 from src.repositories.vacancy import VacancyRepository
 from src.repositories.vacancy_match import VacancyMatchRepository
@@ -15,12 +16,14 @@ class SqlAlchemyUnitOfWork:
         profile_repository: ProfileRepository,
         vacancy_repository: VacancyRepository,
         vacancy_match_repository: VacancyMatchRepository,
+        resume_repository: ResumeRepository,
     ) -> None:
         self._session = session
 
         self.profiles = profile_repository
         self.vacancies = vacancy_repository
         self.vacancy_matches = vacancy_match_repository
+        self.resumes = resume_repository
         self._active = False
 
     async def __aenter__(self) -> Self:
