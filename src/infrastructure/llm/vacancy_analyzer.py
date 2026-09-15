@@ -1,8 +1,6 @@
 import json
 
-from langchain.chat_models import BaseChatModel
-from langchain.messages import HumanMessage, SystemMessage
-
+from src.infrastructure.llm.llm import LLMProvider
 from src.schemas.vacancy import (
     NormalizedVacancy,
     NormalizedVacancyBatch,
@@ -11,8 +9,8 @@ from src.schemas.vacancy import (
 
 
 class VacancyAnalyzer:
-    def __init__(self, model: BaseChatModel) -> None:
-        self._model = model.with_structured_output(NormalizedVacancyBatch)
+    def __init__(self, llm: LLMProvider) -> None:
+        self._llm = llm
 
     async def normalize(
         self,
@@ -24,24 +22,17 @@ class VacancyAnalyzer:
             item["raw_payload"].pop("description", None)
             item["raw_payload"].pop("branded_description", None)
             payload.append(item)
-        messages = [
-            SystemMessage(
-                content=(
-                    "Ты нормализуешь вакансии из разных источников. "
-                    "Верни ровно одну запись для каждой входной записи и сохрани "
-                    "source и external_id без изменений. Извлекай только явно "
-                    "указанные факты, не заполняй отсутствующие данные догадками. "
-                    "Hard-условия запиши в отдельные поля, смысловые требования, "
-                    "навыки и обязанности — в soft_conditions."
-                ),
-            ),
-            HumanMessage(
-                content=(
-                    "Вакансии:\n\n"
-                    + json.dumps(payload, ensure_ascii=False)
-                ),
-            ),
-        ]
-
-        result: NormalizedVacancyBatch = await self._model.ainvoke(messages)
+        system_prompt = (
+            "Ты нормализуешь вакансии из разных источников. "
+            "Верни ровно одну запись для каждой входной записи и сохрани "
+            "source и external_id без изменений. Извлекай только явно "
+            "указанные факты, не заполняй отсутствующие данные догадками. "
+            "Hard-условия запиши в отдельные поля, смысловые требования, "
+            "навыки и обязанности — в soft_conditions."
+        )
+        result = await self._llm.complete(
+            "Вакансии:\n\n" + json.dumps(payload, ensure_ascii=False),
+            system_prompt,
+            schema=NormalizedVacancyBatch,
+        )
         return result.items

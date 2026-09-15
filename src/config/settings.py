@@ -1,6 +1,7 @@
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import (
     AliasChoices,
@@ -79,6 +80,7 @@ class LLMSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
+        env_prefix="LLM_",
         extra="ignore",
     )
 
@@ -92,6 +94,8 @@ class LLMSettings(BaseSettings):
     api_key: SecretStr = Field(
         validation_alias=AliasChoices("LLM_API_KEY", "OPENROUTER_API_KEY"),
     )
+    api_version: str | None = None
+    reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
 
     temperature: float = Field(default=0.2, ge=0, le=2)
     max_tokens: int = Field(default=4096, ge=1)

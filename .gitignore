@@ -13,3 +13,5 @@ wheels/
 data/.secret_key
 data/.secre_key.tmp
 *.gguf
+*.md
+tests/

@@ -2,8 +2,6 @@ from collections.abc import AsyncIterator, Iterator
 
 import httpx
 from dishka import Provider, Scope, provide
-from langchain.chat_models import BaseChatModel
-from langchain_openai import ChatOpenAI
 from services.sercurity import SecurityService
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,16 +61,8 @@ class InfrastructureProvider(Provider):
             yield client
 
     @provide(scope=Scope.APP)
-    def chat_model(self, settings: Settings) -> BaseChatModel:
-        return ChatOpenAI(
-            model=settings.llm.model,
-            api_key=settings.llm.api_key,
-            base_url=str(settings.llm.base_url),
-            temperature=settings.llm.temperature,
-            max_completion_tokens=settings.llm.max_tokens,
-            timeout=settings.llm.request_timeout_seconds,
-            max_retries=settings.llm.max_retries,
-        )
+    def llm_provider(self, settings: Settings) -> LLMProvider:
+        return LLMProvider(settings.llm)
 
     @provide(scope=Scope.APP)
     def hh_client(
@@ -94,7 +84,6 @@ class InfrastructureProvider(Provider):
         scope=Scope.REQUEST,
     )
     hh_source = provide(HhVacancySource, scope=Scope.APP)
-    llm_provider = provide(LLMProvider, scope=Scope.APP)
     profile_analyzer = provide(ProfileAnalyzer, scope=Scope.APP)
     vacancy_normalizer = provide(
         VacancyAnalyzer,
