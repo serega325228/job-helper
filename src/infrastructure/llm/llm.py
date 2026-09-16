@@ -47,7 +47,6 @@ class LLMProvider:
         self._settings = settings
         litellm.drop_params = True
         litellm.modify_params = True
-        self._model_name = self._get_model_name()
         self._router = router
 
     @overload
@@ -104,7 +103,7 @@ class LLMProvider:
                 return content
             return schema.model_validate_json(content)
         except Exception as error:
-            logger.exception("LLM completion failed for model %s", self._model_name)
+            #logger.exception("LLM completion failed for model %s", self._model_name)
             raise ValueError("LLM completion failed") from error
 
     """
@@ -142,10 +141,10 @@ class LLMProvider:
     """
 
     def _supports_temperature(self) -> bool:
-        if self._model_name.startswith(("ollama/", "ollama_chat/")):
+        if self._settings.config.model.startswith(("ollama/", "ollama_chat/")):
             return True
         try:
-            model_info = litellm.get_model_info(model=self._model_name)
+            model_info = litellm.get_model_info(model=self._settings.config.model)
         except Exception:
             return False
         supported_params = model_info.get("supported_openai_params", [])
