@@ -1,27 +1,54 @@
+import asyncio
 import logging
 import re
-from typing import Any, TypeVar, overload
+from typing import Any, Literal, TypeVar, overload
 
 import litellm
 from litellm.router import Router
 from litellm.types.router import RetryPolicy
-from pydantic import BaseModel
+from pydantic import BaseModel, HttpUrl
+from schemas.llm import LLMConfig
 
 from src.config.settings import LLMSettings
 
 logger = logging.getLogger(__name__)
 
+class LLMConfigManager:
+    def __init__(self, settings: LLMSettings, router: Router) -> None:
+        self._settings = settings
+        self._router = router
+        self._lock = asyncio.Lock()
+
+    async def update(self, config: LLMConfig):
+        model_list = self._build_model_list(config)
+        async with self._lock:
+            self._router.set_model_list(model_list)
+            self._settings.config = config
+
+    @staticmethod
+    def _build_model_list(config: LLMConfig) -> list:
+        params = {
+            "model_name": "primary",
+            "litellm_params": {
+                "model": config.model,
+                "api_key": config.api_key,
+            }
+        }
+        if config.api_base:
+            params["litellm_params"]["api_base"] = config.api_base
+        if config.reasoning_effort:
+            params["litellm_params"]["reasoning_effort"] = config.reasoning_effort
+        return [params]
+
 ResponseModel = TypeVar("ResponseModel", bound=BaseModel)
 
-
 class LLMProvider:
-    def __init__(self, settings: LLMSettings) -> None:
+    def __init__(self, settings: LLMSettings, router: Router) -> None:
         self._settings = settings
         litellm.drop_params = True
         litellm.modify_params = True
         self._model_name = self._get_model_name()
-        self._router = self._build_router()
-        self._router_config_key = self._config_fingerprint(settings)
+        self._router = router
 
     @overload
     async def complete(
@@ -53,7 +80,7 @@ class LLMProvider:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        request: dict[str, Any] = {
+        request = {
             "model": "primary",
             "messages": messages,
             "max_tokens": self._settings.max_tokens,
@@ -61,8 +88,8 @@ class LLMProvider:
         }
         if self._supports_temperature():
             request["temperature"] = self._settings.temperature
-        if self._settings.reasoning_effort is not None:
-            request["reasoning_effort"] = self._settings.reasoning_effort
+        if self._settings.config.reasoning_effort:
+            request["reasoning_effort"] = self._settings.config.reasoning_effort
         if schema is not None:
             request["response_format"] = schema
 
@@ -80,49 +107,7 @@ class LLMProvider:
             logger.exception("LLM completion failed for model %s", self._model_name)
             raise ValueError("LLM completion failed") from error
 
-    def _build_router(self) -> Router:
-        params: dict[str, Any] = {
-            "model": self._model_name,
-            "api_key": self._settings.api_key.get_secret_value(),
-        }
-        if self._settings.base_url is not None:
-            params["api_base"] = self._normalize_api_base(
-                str(self._settings.base_url),
-            )
-        if self._settings.api_version is not None:
-            params["api_version"] = self._settings.api_version
-
-        retries = self._settings.max_retries
-        return Router(
-            model_list=[
-                {
-                    "model_name": "primary",
-                    "litellm_params": params,
-                },
-            ],
-            num_retries=retries,
-            retry_policy=RetryPolicy(
-                AuthenticationErrorRetries=0,
-                BadRequestErrorRetries=0,
-                TimeoutErrorRetries=min(retries, 2),
-                RateLimitErrorRetries=retries,
-                ContentPolicyViolationErrorRetries=0,
-                InternalServerErrorRetries=min(retries, 2),
-            ),
-            disable_cooldowns=True,
-        )
-
-    @staticmethod
-    def _config_fingerprint(settings: LLMSettings) -> tuple[Any, ...]:
-        return (
-            settings.provider,
-            settings.model,
-            str(settings.base_url),
-            settings.api_key.get_secret_value(),
-            settings.api_version,
-            settings.max_retries,
-        )
-
+    """
     def _get_model_name(self) -> str:
         provider = self._settings.provider
         model = self._settings.model
@@ -154,6 +139,7 @@ class LLMProvider:
                 if base_url.endswith(suffix):
                     return base_url.removesuffix(suffix)
         return base_url
+    """
 
     def _supports_temperature(self) -> bool:
         if self._model_name.startswith(("ollama/", "ollama_chat/")):

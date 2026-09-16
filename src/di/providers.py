@@ -2,6 +2,8 @@ from collections.abc import AsyncIterator, Iterator
 
 import httpx
 from dishka import Provider, Scope, provide
+from litellm import RetryPolicy
+from litellm.router import Router
 from services.sercurity import SecurityService
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,8 +63,42 @@ class InfrastructureProvider(Provider):
             yield client
 
     @provide(scope=Scope.APP)
-    def llm_provider(self, settings: Settings) -> LLMProvider:
-        return LLMProvider(settings.llm)
+    async def llm_router(self, settings: Settings) -> Router:
+        config = settings.llm.config
+        params = {
+            "model": config.model,
+            "api_key": config.api_key,
+        }
+        if config.api_base:
+            params["api_base"] = str(config.api_base)
+        if config.reasoning_effort:
+            params["reasoning_effort"] = config.reasoning_effort
+        if config.api_version:
+            params["api_version"] = config.api_version
+
+        retries = settings.llm.max_retries
+        return Router(
+            model_list=[
+                {
+                    "model_name": "primary",
+                    "litellm_params": params,
+                },
+            ],
+            num_retries=retries,
+            retry_policy=RetryPolicy(
+                AuthenticationErrorRetries=0,
+                BadRequestErrorRetries=0,
+                TimeoutErrorRetries=min(retries, 2),
+                RateLimitErrorRetries=retries,
+                ContentPolicyViolationErrorRetries=0,
+                InternalServerErrorRetries=min(retries, 2),
+            ),
+            disable_cooldowns=True,
+        )
+
+    @provide(scope=Scope.REQUEST)
+    def llm_provider(self, settings: Settings, router: Router) -> LLMProvider:
+        return LLMProvider(settings.llm, router)
 
     @provide(scope=Scope.APP)
     def hh_client(
