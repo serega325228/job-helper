@@ -41,6 +41,7 @@ class AppSettings(BaseSettings):
 
     host: str = "0.0.0.0"
     port: int = Field(default=8000, ge=1, le=65_535)
+    reload: bool = False
     data_dir: Path = Path(__file__).parent.parent.parent / "data"
 
 
@@ -113,8 +114,12 @@ class LLMSettings(BaseSettings):
     temperature: float = Field(default=0.2, ge=0, le=2)
     max_tokens: int = Field(default=4096, ge=1)
 
+    prompts_path: Path = Path(__file__).parent.parent.parent / "data" / "config.yaml"
+
     request_timeout_seconds: float = Field(default=60.0, gt=0)
     max_retries: int = Field(default=3, ge=0)
+
+    def config
 
 
 class RerankerSettings(BaseSettings):

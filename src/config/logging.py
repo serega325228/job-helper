@@ -10,7 +10,6 @@ from structlog.typing import Processor
 from src.config.settings import LogFormat, LoggingSettings
 
 
-
 def configure_logging(settings: LoggingSettings) -> None:
     settings.directory.mkdir(
         parents=True,

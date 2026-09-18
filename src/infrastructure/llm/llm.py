@@ -56,6 +56,8 @@ class LLMProvider:
         system_prompt: str | None = None,
         *,
         schema: None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.3,
     ) -> str: ...
 
     @overload
@@ -65,6 +67,8 @@ class LLMProvider:
         system_prompt: str | None = None,
         *,
         schema: type[ResponseModel],
+        max_tokens: int = 4096,
+        temperature: float = 0.3,
     ) -> ResponseModel: ...
 
     async def complete(
@@ -73,6 +77,8 @@ class LLMProvider:
         system_prompt: str | None = None,
         *,
         schema: type[ResponseModel] | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.3,
     ) -> str | ResponseModel:
         messages: list[dict[str, str]] = []
         if system_prompt:
@@ -82,11 +88,11 @@ class LLMProvider:
         request = {
             "model": "primary",
             "messages": messages,
-            "max_tokens": self._settings.max_tokens,
+            "max_tokens": max_tokens,
             "timeout": self._settings.request_timeout_seconds,
         }
         if self._supports_temperature():
-            request["temperature"] = self._settings.temperature
+            request["temperature"] = temperature
         if self._settings.config.reasoning_effort:
             request["reasoning_effort"] = self._settings.config.reasoning_effort
         if schema is not None:

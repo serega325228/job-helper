@@ -9,6 +9,7 @@ LANGUAGE_NAMES = {
     "pt": "Brazilian Portuguese",
     "fr": "French",
     "ko": "Korean",
+    "ru": "Russian"
 }
 
 
