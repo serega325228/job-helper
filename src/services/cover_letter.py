@@ -15,7 +15,7 @@ from src.prompts.templates import (
 )
 
 
-class CoverLetter:
+class CoverLetterService:
     def __init__(
         self,
         llm: LLMProvider,

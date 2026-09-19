@@ -177,3 +177,60 @@ class LLMProvider:
     def _strip_thinking_tags(content: str) -> str:
         content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
         return re.sub(r"<think>.*", "", content, flags=re.DOTALL).strip()
+
+    def get_safe_max_tokens(
+        self,
+        requested: int | None = None,
+    ) -> int:
+        """Return a token count safe for the given model, clamped to its output limit.
+
+        Queries LiteLLM's model registry for ``max_output_tokens`` and returns
+        ``min(requested, model_limit)`` so callers never send a value that exceeds
+        what the backend actually supports.
+
+        If the model is not in the registry (e.g. custom Ollama models), it falls
+        back to a conservative limit. The verified OpenCode Zen HY3 route is an
+        exception because JSON extraction disables reasoning for that model and
+        needs the full structured-output budget.
+
+        Args:
+            model_name: LiteLLM-formatted model name (from get_model_name).
+            requested: Desired token budget; defaults to DEFAULT_JSON_MAX_TOKENS.
+            config: Optional provider configuration for scoped compatibility rules.
+
+        Returns:
+            Safe token count, clamped correctly and always >= 1.
+        """
+        if not requested:
+            return self._settings.max_tokens
+
+        safe_requested = max(1, requested)
+
+        try:
+            info = litellm.get_model_info(model=self._settings.config.model)
+            model_limit = info.get("max_output_tokens") or info.get("max_tokens")
+            if model_limit and isinstance(model_limit, int) and model_limit > 0:
+                safe = min(safe_requested, model_limit)
+                # if safe < safe_requested:
+                #     logging.debug(
+                #         "max_tokens clamped %d → %d for model %s (model limit)",
+                #         safe_requested,
+                #         safe,
+                #         model_name,
+                #     )
+                return safe
+        except Exception:
+            pass  # Model not in registry, drop down to fallback logic
+
+        # fallback_limit = (
+        #     self._settings.max_tokens
+        #     if config is not None and _uses_opencode_zen_hy3(config)
+        #     else FALLBACK_MAX_TOKENS
+        # )
+        #safe = min(safe_requested, fallback_limit)
+        # logging.debug(
+        #     "Model %s not in LiteLLM registry, using fallback max_tokens %d",
+        #     model_name,
+        #     safe,
+        # )
+        return self._settings.max_tokens

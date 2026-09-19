@@ -85,10 +85,7 @@ class EmbeddingSettings(BaseSettings):
         extra="ignore",
     )
 
-    model_path: Path = Path(
-        "~/projects/job-helper/.models/"
-        "embeddinggemma-300M-Q8_0.gguf"
-    )
+    model_path: Path = Path(__file__).parent.parent.parent / ".models" / "embeddinggemma-300M-Q8_0.gguf"
 
     @property
     def resolved_model_path(self) -> Path:
@@ -117,10 +114,17 @@ class LLMSettings(BaseSettings):
     prompts_path: Path = Path(__file__).parent.parent.parent / "data" / "config.yaml"
 
     request_timeout_seconds: float = Field(default=60.0, gt=0)
-    max_retries: int = Field(default=3, ge=0)
+    max_retries: int = Field(default=2, ge=0)
 
-    def config
+class PDFSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        env_prefix="PDF_",
+        extra="ignore",
+    )
 
+    max_concurrency: int = Field(default=4, gt=0)
 
 class RerankerSettings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -176,6 +180,7 @@ class Settings(BaseSettings):
     app: AppSettings = AppSettings()
     database: DatabaseSettings = DatabaseSettings()
     llm: LLMSettings = LLMSettings()
+    pdf: PDFSettings = PDFSettings()
     embedding: EmbeddingSettings = EmbeddingSettings()
     reranker: RerankerSettings = RerankerSettings()
     agents: AgentSettings = AgentSettings()

@@ -2,11 +2,15 @@ from collections.abc import AsyncIterator, Iterator
 
 import httpx
 from dishka import Provider, Scope, provide
+from infrastructure.pdf.pdf import PDFRender
 from litellm import RetryPolicy
 from litellm.router import Router
-from services.sercurity import SecurityService
+from playwright.async_api import Browser, Playwright, async_playwright
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from repositories.prompt import PromptRepository
+from services.cover_letter import CoverLetterService
+from services.sercurity import SecurityService
 from src.config.settings import Settings
 from src.infrastructure.db.engine import Database
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
@@ -138,25 +142,35 @@ class InfrastructureProvider(Provider):
             batch_size=settings.reranker.batch_size,
         )
 
+    @provide(scope=Scope.APP)
+    async def playwright(self) -> AsyncIterator[Playwright]:
+        pw = await async_playwright().start()
+        yield pw
+        await pw.stop()
+
+    @provide(scope=Scope.APP)
+    def pdf_render(self, playwright: Playwright, settings: Settings) -> PDFRender:
+        return PDFRender(playwright, settings.pdf)
+
 
 class RepositoryProvider(Provider):
     profile_repository = provide(ProfileRepository, scope=Scope.REQUEST)
     vacancy_repository = provide(VacancyRepository, scope=Scope.REQUEST)
     vacancy_match_repository = provide(VacancyMatchRepository, scope=Scope.REQUEST)
+    prompt_repository = provide(PromptRepository, scope=Scope.APP)
 
 
 class ServiceProvider(Provider):
     profile_service = provide(ProfileService, scope=Scope.REQUEST)
     vacancy_service = provide(VacancyService, scope=Scope.REQUEST)
     vacancy_match_service = provide(VacancyMatchService, scope=Scope.REQUEST)
+
     @provide(scope=Scope.APP)
     def security_service(
         self,
         settings: Settings,
     ) -> SecurityService:
-        return SecurityService(
-            settings.app.data_dir
-        )
+        return SecurityService(settings.app.data_dir)
 
     @provide(scope=Scope.REQUEST)
     def scoring_service(
@@ -181,3 +195,12 @@ class ServiceProvider(Provider):
             yield service
         finally:
             service.close()
+
+    @provide(scope=Scope.REQUEST)
+    def cover_letter(
+        self, provider: LLMProvider, prompts: PromptRepository
+    ) -> CoverLetterService:
+        return CoverLetterService(
+            provider,
+            prompts,
+        )
