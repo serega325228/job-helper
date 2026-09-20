@@ -1,14 +1,24 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
 
+import structlog
+from dishka.integrations.fastapi import setup_dishka
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from langgraph.graph.state import CompiledStateGraph
 from pydantic.dataclasses import dataclass
-
-from src.agents.supervisor.tools import create_supervisor_tools
-from src.config.settings import Settings
 from src.graphs.supervisor.tools import SupervisorToolHandlers
 
-settings = Settings()
+from config.logging import configure_logging
+from di.container import create_container
+from src.agents.supervisor.tools import create_supervisor_tools
+from src.config.settings import get_settings
+
+settings = get_settings()
+
+configure_logging(settings.logging)
+
+logger = structlog.get_logger().bind(component=__name__)
+
 repositories = create_repositories(settings)
 services = create_services(repositories, settings)
 models = create_model_registry(settings)
@@ -30,6 +40,7 @@ handlers = SupervisorToolHandlers(
 tools = create_supervisor_tools(handlers)
 supervisor = create_supervisor_agent(models.supervisor, tools)
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Migrate DB here
@@ -45,12 +56,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error closing database: {e}")
 
+    try:
+        await container.close()
+    except Exception as e:
+        logger.error(f"Error closing DI container: {e}")
+
 
 app = FastAPI(
     title="Job Helper API",
     description="AI-powered job scraping, scoring and resume tailoring",
     lifespan=lifespan,
 )
+
+container = create_container()
+setup_dishka(
+    container=container,
+    app=app,
+)
+
 
 # CORS middleware - origins configurable via CORS_ORIGINS env var
 app.add_middleware(

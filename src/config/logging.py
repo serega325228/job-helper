@@ -97,9 +97,7 @@ def configure_logging(settings: LoggingSettings) -> None:
                     "class": "logging.handlers.RotatingFileHandler",
                     "level": settings.level.value,
                     "formatter": "json",
-                    "filename": str(
-                        settings.directory / settings.filename
-                    ),
+                    "filename": str(settings.directory / settings.filename),
                     "maxBytes": settings.max_bytes,
                     "backupCount": settings.backup_count,
                     "encoding": "utf-8",
