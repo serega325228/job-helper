@@ -1,5 +1,6 @@
 from types import TracebackType
 from typing import Self
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,3 +52,18 @@ class SqlAlchemyUnitOfWork:
 
     async def flush(self) -> None:
         await self._session.flush()
+
+    async def get_stats(
+        self,
+        profile_id: UUID
+    ) -> dict:
+        async with self:
+             resumes = await self.resumes.get_amount_by_profile_id(profile_id)
+             scrapped_vacancies = await self.vacancies.get_amount()
+             matched_vacancies = self.vacancy_matches.get_amount_by_profile_id(profile_id)
+
+        return {
+            "resumes": resumes,
+            "scrapped_vacancies": scrapped_vacancies,
+            "matched_vacancies": matched_vacancies
+        }

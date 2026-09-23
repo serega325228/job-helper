@@ -60,7 +60,7 @@ class DatabaseSettings(BaseSettings):
 
     user: str = "postgres"
     password: SecretStr = SecretStr("postgres")
-    database: str = "job_finder"
+    database: str = "job_helper"
 
     echo: bool = False
     pool_pre_ping: bool = True
@@ -106,7 +106,7 @@ class LLMSettings(BaseSettings):
         extra="ignore",
     )
 
-    config: LLMConfig
+    config: LLMConfig | None = None
 
     temperature: float = Field(default=0.2, ge=0, le=2)
     max_tokens: int = Field(default=4096, ge=1)
@@ -115,6 +115,20 @@ class LLMSettings(BaseSettings):
 
     request_timeout_seconds: float = Field(default=60.0, gt=0)
     max_retries: int = Field(default=2, ge=0)
+
+class RefinerSettings(BaseSettings):
+    """Configuration for refinement passes."""
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        env_prefix="REFINER_",
+        extra="ignore",
+    )
+
+    enable_keyword_injection: bool = Field(default=True)
+    enable_ai_phrase_removal: bool = Field(default=True)
+    enable_master_alignment_check: bool = Field(default=True)
+    max_refinement_passes: int = Field(default=2, ge=1, le=5)
 
 class PDFSettings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -180,6 +194,7 @@ class Settings(BaseSettings):
     app: AppSettings = AppSettings()
     database: DatabaseSettings = DatabaseSettings()
     llm: LLMSettings = LLMSettings()
+    refiner: RefinerSettings = RefinerSettings()
     pdf: PDFSettings = PDFSettings()
     embedding: EmbeddingSettings = EmbeddingSettings()
     reranker: RerankerSettings = RerankerSettings()

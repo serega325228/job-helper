@@ -175,3 +175,13 @@ class VacancyMatchRepository:
             VacancyEmbeddingSearchResult.model_validate(row)
             for row in result.mappings()
         ]
+
+    async def get_amount_by_profile_id(self, profile_id: UUID) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(VacancyMatch)
+            .where(VacancyMatch.profile_id == profile_id)
+        )
+
+        result = await self._session.scalar(stmt)
+        return result if result else 0

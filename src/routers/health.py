@@ -2,11 +2,16 @@
 
 import logging
 
+from config.settings import LLMSettings
 from fastapi import APIRouter
 
-from app.database import db
-from app.llm import check_llm_health, get_llm_config
-from app.schemas import HealthResponse, StatusResponse
+from dishka.integrations.fastapi import FromDishka, inject
+from infrastructure.db.engine import Database
+from infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
+from infrastructure.llm.llm import LLMProvider
+from sqlalchemy.orm.strategies import unitofwork
+
+from src.schemas.api import HealthResponse, StatusResponse
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +37,11 @@ async def health_check() -> HealthResponse:
 
 
 @router.get("/status", response_model=StatusResponse)
-async def get_status() -> StatusResponse:
+@inject
+async def get_status(
+    llm: FromDishka[LLMProvider],
+    uow: FromDishka[SqlAlchemyUnitOfWork]
+) -> StatusResponse:
     """Get comprehensive application status.
 
     Each subsystem check is isolated: a failure in the LLM health probe or the
@@ -42,17 +51,17 @@ async def get_status() -> StatusResponse:
     llm_configured = False
     llm_healthy = False
     try:
-        config = get_llm_config()
+        config = llm.get_config()
         # ollama / openai_compatible run without a key, matching check_llm_health.
-        llm_configured = bool(config.api_key) or config.provider in ("ollama", "openai_compatible")
-        llm_status = await check_llm_health(config)
+        llm_configured = config is not None and (bool(config.api_key) or config.provider in ("ollama", "openai_compatible"))
+        llm_status = await llm.check_llm_health()
         llm_healthy = bool(llm_status.get("healthy"))
     except Exception:
         logger.exception("Status: LLM health check failed")
 
     db_stats: dict = dict(_EMPTY_DB_STATS)
     try:
-        db_stats = await db.get_stats()
+        db_stats = await uow.get_stats(profile_id) #think about user id
     except Exception:
         logger.exception("Status: database stats failed")
 

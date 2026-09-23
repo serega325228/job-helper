@@ -6,6 +6,7 @@ from infrastructure.pdf.pdf import PDFRender
 from litellm import RetryPolicy
 from litellm.router import Router
 from playwright.async_api import Browser, Playwright, async_playwright
+from services.refiner import RefinerService
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from repositories.prompt import PromptRepository
@@ -14,7 +15,7 @@ from services.sercurity import SecurityService
 from src.config.settings import Settings
 from src.infrastructure.db.engine import Database
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
-from src.infrastructure.llm.llm import LLMProvider
+from src.infrastructure.llm.llm import LLMConfigManager, LLMProvider, build_model_list
 from src.infrastructure.llm.profile_analyzer import ProfileAnalyzer
 from src.infrastructure.llm.vacancy_analyzer import VacancyAnalyzer
 from src.infrastructure.reranker.vacancy_reranker import VacancyReranker
@@ -67,27 +68,22 @@ class InfrastructureProvider(Provider):
             yield client
 
     @provide(scope=Scope.APP)
+    async def llm_config_manager(self, settings: Settings, router: Router) -> LLMConfigManager:
+        return LLMConfigManager(
+            settings.llm,
+            router,
+        )
+
+    @provide(scope=Scope.APP)
     async def llm_router(self, settings: Settings) -> Router:
         config = settings.llm.config
-        params = {
-            "model": config.model,
-            "api_key": config.api_key,
-        }
-        if config.api_base:
-            params["api_base"] = str(config.api_base)
-        if config.reasoning_effort:
-            params["reasoning_effort"] = config.reasoning_effort
-        if config.api_version:
-            params["api_version"] = config.api_version
+        model_list = []
+        if config is not None:
+            model_list = build_model_list(config)
 
         retries = settings.llm.max_retries
         return Router(
-            model_list=[
-                {
-                    "model_name": "primary",
-                    "litellm_params": params,
-                },
-            ],
+            model_list=model_list,
             num_retries=retries,
             retry_policy=RetryPolicy(
                 AuthenticationErrorRetries=0,
@@ -203,4 +199,13 @@ class ServiceProvider(Provider):
         return CoverLetterService(
             provider,
             prompts,
+        )
+
+    @provide(scope=Scope.REQUEST)
+    def refiner_service(
+        self, provider: LLMProvider, settings: Settings
+    ) -> RefinerService:
+        return RefinerService(
+            provider,
+            settings.refiner
         )

@@ -14,9 +14,8 @@ import re
 from functools import lru_cache
 from typing import Any
 
+from config.settings import RefinerSettings
 from infrastructure.llm.llm import LLMProvider
-
-from app.llm import complete_json
 from src.prompts.refinement import (
     AI_PHRASE_BLACKLIST,
     AI_PHRASE_REPLACEMENTS,
@@ -26,7 +25,6 @@ from src.schemas.refinement import (
     AlignmentReport,
     AlignmentViolation,
     KeywordGapAnalysis,
-    RefinementConfig,
     RefinementResult,
 )
 
@@ -36,9 +34,11 @@ logger = logging.getLogger(__name__)
 MAX_JD_LENGTH = 2000
 MIN_TRUNCATION_WARNING_LENGTH = 1500
 
+
 class RefinerService:
-    def __init__(self, llm: LLMProvider):
+    def __init__(self, llm: LLMProvider, settings: RefinerSettings):
         self._llm = llm
+        self._settings = settings
 
     @staticmethod
     def _keyword_in_text(keyword: str, text: str) -> bool:
@@ -78,7 +78,6 @@ class RefinerService:
                     keys.add(RefinerService._normalize_skill_key(value))
         return keys
 
-
     async def refine_resume(
         self,
         initial_tailored: dict[str, Any],
@@ -110,7 +109,9 @@ class RefinerService:
 
         # Pass 1: Keyword injection (if enabled)
         if config.enable_keyword_injection:
-            keyword_analysis = analyze_keyword_gaps(job_keywords, current, master_resume)
+            keyword_analysis = RefinerService.analyze_keyword_gaps(
+                job_keywords, current, master_resume
+            )
             if keyword_analysis.injectable_keywords:
                 logger.info(
                     "Injecting %d keywords: %s",
@@ -118,7 +119,7 @@ class RefinerService:
                     keyword_analysis.injectable_keywords,
                 )
                 try:
-                    current = await inject_keywords(
+                    current = await self.inject_keywords(
                         current,
                         keyword_analysis.injectable_keywords,
                         master_resume,
@@ -130,7 +131,9 @@ class RefinerService:
 
         # Pass 2: AI phrase removal and polish (local, no LLM call)
         if config.enable_ai_phrase_removal:
-            current, removed = remove_ai_phrases(current, job_description)
+            current, removed = RefinerService.remove_ai_phrases(
+                current, job_description
+            )
             ai_phrases_found.extend(removed)
             if removed:
                 logger.info("Removed %d AI phrases: %s", len(removed), removed)
@@ -139,7 +142,7 @@ class RefinerService:
         # Pass 3: Master alignment validation
         # LLM-008: Alignment validation is MANDATORY - not optional fallback
         if config.enable_master_alignment_check:
-            alignment = validate_master_alignment(
+            alignment = RefinerService.validate_master_alignment(
                 current,
                 master_resume,
                 allowed_new_skills=self._extract_jd_skill_keys(
@@ -165,15 +168,19 @@ class RefinerService:
                         [v.value for v in critical_violations],
                     )
                     # Fix violations before returning
-                    current = fix_alignment_violations(current, alignment.violations)
+                    current = RefinerService.fix_alignment_violations(
+                        current, alignment.violations
+                    )
                     passes += 1
                 else:
                     # Non-critical violations - fix and continue
-                    current = fix_alignment_violations(current, alignment.violations)
+                    current = RefinerService.fix_alignment_violations(
+                        current, alignment.violations
+                    )
                     passes += 1
 
         # Calculate final match percentage
-        final_match = calculate_keyword_match(current, job_keywords)
+        final_match = RefinerService.calculate_keyword_match(current, job_keywords)
 
         return RefinementResult(
             refined_data=current,
@@ -184,57 +191,57 @@ class RefinerService:
             final_match_percentage=final_match,
         )
 
+    @staticmethod
+    def analyze_keyword_gaps(
+        jd_keywords: dict[str, Any],
+        tailored: dict[str, Any],
+        master: dict[str, Any],
+    ) -> KeywordGapAnalysis:
+        """Analyze which JD keywords are missing from the tailored resume.
 
-def analyze_keyword_gaps(
-    jd_keywords: dict[str, Any],
-    tailored: dict[str, Any],
-    master: dict[str, Any],
-) -> KeywordGapAnalysis:
-    """Analyze which JD keywords are missing from the tailored resume.
+        Args:
+            jd_keywords: Extracted job keywords with required_skills, preferred_skills, etc.
+            tailored: Current tailored resume data
+            master: Master resume data (source of truth)
 
-    Args:
-        jd_keywords: Extracted job keywords with required_skills, preferred_skills, etc.
-        tailored: Current tailored resume data
-        master: Master resume data (source of truth)
+        Returns:
+            KeywordGapAnalysis with missing, injectable, and non-injectable keywords
+        """
+        # Extract text content from resumes
+        tailored_text = RefinerService._extract_all_text(tailored).lower()
+        master_text = RefinerService._extract_all_text(master).lower()
 
-    Returns:
-        KeywordGapAnalysis with missing, injectable, and non-injectable keywords
-    """
-    # Extract text content from resumes
-    tailored_text = _extract_all_text(tailored).lower()
-    master_text = _extract_all_text(master).lower()
+        # Get all keywords from JD
+        all_jd_keywords: set[str] = set()
+        all_jd_keywords.update(jd_keywords.get("required_skills", []))
+        all_jd_keywords.update(jd_keywords.get("preferred_skills", []))
+        all_jd_keywords.update(jd_keywords.get("keywords", []))
 
-    # Get all keywords from JD
-    all_jd_keywords: set[str] = set()
-    all_jd_keywords.update(jd_keywords.get("required_skills", []))
-    all_jd_keywords.update(jd_keywords.get("preferred_skills", []))
-    all_jd_keywords.update(jd_keywords.get("keywords", []))
+        # Find missing keywords
+        missing: list[str] = []
+        injectable: list[str] = []
+        non_injectable: list[str] = []
 
-    # Find missing keywords
-    missing: list[str] = []
-    injectable: list[str] = []
-    non_injectable: list[str] = []
+        for keyword in all_jd_keywords:
+            if not RefinerService._keyword_in_text(keyword, tailored_text):
+                missing.append(keyword)
+                if RefinerService._keyword_in_text(keyword, master_text):
+                    injectable.append(keyword)
+                else:
+                    non_injectable.append(keyword)
 
-    for keyword in all_jd_keywords:
-        if not _keyword_in_text(keyword, tailored_text):
-            missing.append(keyword)
-            if _keyword_in_text(keyword, master_text):
-                injectable.append(keyword)
-            else:
-                non_injectable.append(keyword)
+        # Calculate percentages
+        total = len(all_jd_keywords) if all_jd_keywords else 1
+        current_match = (total - len(missing)) / total * 100
+        potential_match = (total - len(non_injectable)) / total * 100
 
-    # Calculate percentages
-    total = len(all_jd_keywords) if all_jd_keywords else 1
-    current_match = (total - len(missing)) / total * 100
-    potential_match = (total - len(non_injectable)) / total * 100
-
-    return KeywordGapAnalysis(
-        missing_keywords=missing,
-        injectable_keywords=injectable,
-        non_injectable_keywords=non_injectable,
-        current_match_percentage=current_match,
-        potential_match_percentage=potential_match,
-    )
+        return KeywordGapAnalysis(
+            missing_keywords=missing,
+            injectable_keywords=injectable,
+            non_injectable_keywords=non_injectable,
+            current_match_percentage=current_match,
+            potential_match_percentage=potential_match,
+        )
 
     @staticmethod
     def remove_ai_phrases(
@@ -329,7 +336,7 @@ def analyze_keyword_gaps(
             for skill in (allowed_new_skills or set())
             if isinstance(skill, str) and skill.strip()
         }
-        master_full_text = _extract_all_text(master).lower()
+        master_full_text = RefinerService._extract_all_text(master).lower()
 
         for skill in tailored_skills - master_skills:
             if RefinerService._normalize_skill_key(skill) in allowed_skills:
@@ -521,14 +528,16 @@ def analyze_keyword_gaps(
         if isinstance(orig_sections, dict) and isinstance(new_sections, dict):
             for key, new_section in new_sections.items():
                 orig_section = orig_sections.get(key)
-                if not isinstance(orig_section, dict) or not isinstance(new_section, dict):
+                if not isinstance(orig_section, dict) or not isinstance(
+                    new_section, dict
+                ):
                     continue
                 _restore(orig_section.get("items"), new_section.get("items"))
 
         return improved
 
-    @staticmethod
     async def inject_keywords(
+        self,
         tailored: dict[str, Any],
         keywords_to_inject: list[str],
         master: dict[str, Any],
@@ -549,7 +558,7 @@ def analyze_keyword_gaps(
         LLM-014: Validates result structure before returning.
         """
         # LLM-012: Prepare job description with truncation handling
-        truncated_jd, was_truncated = _prepare_job_description(job_description)
+        truncated_jd, was_truncated = self._prepare_job_description(job_description)
         if was_truncated:
             logger.info(
                 "Job description was truncated for keyword injection (original: %d chars)",
@@ -564,7 +573,7 @@ def analyze_keyword_gaps(
         )
 
         try:
-            result = await complete_json(
+            result = await self._llm.complete(
                 prompt=prompt,
                 system_prompt=(
                     "You are a resume editor. Inject keywords naturally without adding "
@@ -578,7 +587,7 @@ def analyze_keyword_gaps(
                 logger.warning("Keyword injection returned non-dict: %s", type(result))
                 return tailored
 
-            if not _validate_resume_structure(result):
+            if not self._validate_resume_structure(result):
                 logger.warning(
                     "Keyword injection corrupted resume structure, using original"
                 )
@@ -588,7 +597,7 @@ def analyze_keyword_gaps(
             # prompt is not a guarantee for positional metadata. Restore it locally,
             # matching the defence-in-depth pattern the improve pipeline already
             # uses for dates, skills, personalInfo and custom sections.
-            return _preserve_description_styles(tailored, result)
+            return self._preserve_description_styles(tailored, result)
 
         except Exception as e:
             logger.warning("Keyword injection failed: %s", e)
@@ -630,7 +639,9 @@ def analyze_keyword_gaps(
 
             elif violation.violation_type == "fabricated_company":
                 # SVC-002: Remove the fabricated work experience entry
-                logger.error("Critical: Fabricated company detected: %s", violation.value)
+                logger.error(
+                    "Critical: Fabricated company detected: %s", violation.value
+                )
                 if "workExperience" in fixed:
                     fixed["workExperience"] = [
                         exp
@@ -644,133 +655,135 @@ def analyze_keyword_gaps(
 
         return fixed
 
+    @staticmethod
+    def calculate_keyword_match(
+        resume: dict[str, Any],
+        jd_keywords: dict[str, Any],
+    ) -> float:
+        """Calculate keyword match percentage.
 
-def calculate_keyword_match(
-    resume: dict[str, Any],
-    jd_keywords: dict[str, Any],
-) -> float:
-    """Calculate keyword match percentage.
+        Args:
+            resume: Resume data dictionary
+            jd_keywords: Extracted job keywords
 
-    Args:
-        resume: Resume data dictionary
-        jd_keywords: Extracted job keywords
+        Returns:
+            Match percentage (0.0 to 100.0)
+        """
+        resume_text = RefinerService._extract_all_text(resume).lower()
 
-    Returns:
-        Match percentage (0.0 to 100.0)
-    """
-    resume_text = _extract_all_text(resume).lower()
+        all_keywords: set[str] = set()
+        all_keywords.update(jd_keywords.get("required_skills", []))
+        all_keywords.update(jd_keywords.get("preferred_skills", []))
+        all_keywords.update(jd_keywords.get("keywords", []))
 
-    all_keywords: set[str] = set()
-    all_keywords.update(jd_keywords.get("required_skills", []))
-    all_keywords.update(jd_keywords.get("preferred_skills", []))
-    all_keywords.update(jd_keywords.get("keywords", []))
+        # SVC-009: Return 0% if no keywords (not 100% - that's misleading)
+        if not all_keywords:
+            logger.warning("No keywords found in job description")
+            return 0.0
 
-    # SVC-009: Return 0% if no keywords (not 100% - that's misleading)
-    if not all_keywords:
-        logger.warning("No keywords found in job description")
-        return 0.0
+        # SVC-010: Use word boundary matching instead of substring
+        matched = sum(
+            1 for kw in all_keywords if RefinerService._keyword_in_text(kw, resume_text)
+        )
+        return (matched / len(all_keywords)) * 100
 
-    # SVC-010: Use word boundary matching instead of substring
-    matched = sum(1 for kw in all_keywords if _keyword_in_text(kw, resume_text))
-    return (matched / len(all_keywords)) * 100
+    @staticmethod
+    def _extract_all_text(data: dict[str, Any]) -> str:
+        """Extract all text content from resume data for keyword matching.
 
+        SVC-011: Uses caching to avoid repeated extraction on same resume data.
 
-def _extract_all_text(data: dict[str, Any]) -> str:
-    """Extract all text content from resume data for keyword matching.
+        Args:
+            data: Resume data dictionary
 
-    SVC-011: Uses caching to avoid repeated extraction on same resume data.
+        Returns:
+            Concatenated text from all resume sections
+        """
+        # Create a cache key from the data
+        data_json = json.dumps(data, sort_keys=True, default=str)
+        return RefinerService._extract_all_text_cached(data_json)
 
-    Args:
-        data: Resume data dictionary
+    @staticmethod
+    @lru_cache(maxsize=100)
+    def _extract_all_text_cached(data_json: str) -> str:
+        """Cached implementation of text extraction.
 
-    Returns:
-        Concatenated text from all resume sections
-    """
-    # Create a cache key from the data
-    data_json = json.dumps(data, sort_keys=True, default=str)
-    return _extract_all_text_cached(data_json)
+        SVC-011: LRU cache avoids re-extracting text from the same resume
+        multiple times during a single refinement pass.
+        """
+        data = json.loads(data_json)
+        parts: list[str] = []
 
+        # Summary
+        if data.get("summary"):
+            parts.append(str(data["summary"]))
 
-@lru_cache(maxsize=100)
-def _extract_all_text_cached(data_json: str) -> str:
-    """Cached implementation of text extraction.
+        # Work experience
+        for exp in data.get("workExperience", []):
+            if isinstance(exp, dict):
+                parts.append(str(exp.get("title", "")))
+                parts.append(str(exp.get("company", "")))
+                desc = exp.get("description", [])
+                if isinstance(desc, list):
+                    parts.extend(str(d) for d in desc)
 
-    SVC-011: LRU cache avoids re-extracting text from the same resume
-    multiple times during a single refinement pass.
-    """
-    data = json.loads(data_json)
-    parts: list[str] = []
+        # Education
+        for edu in data.get("education", []):
+            if isinstance(edu, dict):
+                parts.append(str(edu.get("degree", "")))
+                parts.append(str(edu.get("institution", "")))
+                if edu.get("description"):
+                    parts.append(str(edu["description"]))
 
-    # Summary
-    if data.get("summary"):
-        parts.append(str(data["summary"]))
+        # Projects
+        for proj in data.get("personalProjects", []):
+            if isinstance(proj, dict):
+                parts.append(str(proj.get("name", "")))
+                parts.append(str(proj.get("role", "")))
+                desc = proj.get("description", [])
+                if isinstance(desc, list):
+                    parts.extend(str(d) for d in desc)
 
-    # Work experience
-    for exp in data.get("workExperience", []):
-        if isinstance(exp, dict):
-            parts.append(str(exp.get("title", "")))
-            parts.append(str(exp.get("company", "")))
-            desc = exp.get("description", [])
-            if isinstance(desc, list):
-                parts.extend(str(d) for d in desc)
+        # Additional
+        additional = data.get("additional", {})
+        if isinstance(additional, dict):
+            skills = additional.get("technicalSkills", [])
+            if isinstance(skills, list):
+                parts.extend(str(s) for s in skills)
+            certs = additional.get("certificationsTraining", [])
+            if isinstance(certs, list):
+                parts.extend(str(c) for c in certs)
+            languages = additional.get("languages", [])
+            if isinstance(languages, list):
+                parts.extend(str(lang) for lang in languages)
+            awards = additional.get("awards", [])
+            if isinstance(awards, list):
+                parts.extend(str(a) for a in awards)
 
-    # Education
-    for edu in data.get("education", []):
-        if isinstance(edu, dict):
-            parts.append(str(edu.get("degree", "")))
-            parts.append(str(edu.get("institution", "")))
-            if edu.get("description"):
-                parts.append(str(edu["description"]))
+        # Custom sections
+        custom_sections = data.get("customSections", {})
+        if isinstance(custom_sections, dict):
+            for section in custom_sections.values():
+                if not isinstance(section, dict):
+                    continue
+                section_type = section.get("sectionType", "")
+                if section_type == "itemList":
+                    for item in section.get("items", []):
+                        if isinstance(item, dict):
+                            parts.append(str(item.get("title", "")))
+                            parts.append(str(item.get("subtitle", "")))
+                            desc = item.get("description", [])
+                            if isinstance(desc, list):
+                                parts.extend(str(d) for d in desc)
+                            elif isinstance(desc, str):
+                                parts.append(desc)
+                elif section_type == "text":
+                    text = section.get("text", "")
+                    if isinstance(text, str):
+                        parts.append(text)
+                elif section_type == "stringList":
+                    items = section.get("strings", [])
+                    if isinstance(items, list):
+                        parts.extend(str(i) for i in items)
 
-    # Projects
-    for proj in data.get("personalProjects", []):
-        if isinstance(proj, dict):
-            parts.append(str(proj.get("name", "")))
-            parts.append(str(proj.get("role", "")))
-            desc = proj.get("description", [])
-            if isinstance(desc, list):
-                parts.extend(str(d) for d in desc)
-
-    # Additional
-    additional = data.get("additional", {})
-    if isinstance(additional, dict):
-        skills = additional.get("technicalSkills", [])
-        if isinstance(skills, list):
-            parts.extend(str(s) for s in skills)
-        certs = additional.get("certificationsTraining", [])
-        if isinstance(certs, list):
-            parts.extend(str(c) for c in certs)
-        languages = additional.get("languages", [])
-        if isinstance(languages, list):
-            parts.extend(str(lang) for lang in languages)
-        awards = additional.get("awards", [])
-        if isinstance(awards, list):
-            parts.extend(str(a) for a in awards)
-
-    # Custom sections
-    custom_sections = data.get("customSections", {})
-    if isinstance(custom_sections, dict):
-        for section in custom_sections.values():
-            if not isinstance(section, dict):
-                continue
-            section_type = section.get("sectionType", "")
-            if section_type == "itemList":
-                for item in section.get("items", []):
-                    if isinstance(item, dict):
-                        parts.append(str(item.get("title", "")))
-                        parts.append(str(item.get("subtitle", "")))
-                        desc = item.get("description", [])
-                        if isinstance(desc, list):
-                            parts.extend(str(d) for d in desc)
-                        elif isinstance(desc, str):
-                            parts.append(desc)
-            elif section_type == "text":
-                text = section.get("text", "")
-                if isinstance(text, str):
-                    parts.append(text)
-            elif section_type == "stringList":
-                items = section.get("strings", [])
-                if isinstance(items, list):
-                    parts.extend(str(i) for i in items)
-
-    return " ".join(p for p in parts if p)
+        return " ".join(p for p in parts if p)

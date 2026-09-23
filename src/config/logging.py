@@ -17,6 +17,12 @@ def configure_logging(settings: LoggingSettings) -> None:
     )
 
     shared_processors: list[Processor] = [
+        structlog.processors.CallsiteParameterAdder(
+            {
+                structlog.processors.CallsiteParameter.FILENAME,
+                structlog.processors.CallsiteParameter.LINENO,
+            }
+        ),
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         structlog.stdlib.PositionalArgumentsFormatter(),
@@ -27,12 +33,12 @@ def configure_logging(settings: LoggingSettings) -> None:
         structlog.processors.format_exc_info,
         structlog.processors.StackInfoRenderer(),
         structlog.processors.UnicodeDecoder(),
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
     ]
 
     structlog.configure(
         processors=[
             *shared_processors,
-            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
         wrapper_class=structlog.make_filtering_bound_logger(
             logging.getLevelName(settings.level.value)

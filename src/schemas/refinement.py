@@ -3,15 +3,6 @@
 from pydantic import BaseModel, Field
 
 
-class RefinementConfig(BaseModel):
-    """Configuration for refinement passes."""
-
-    enable_keyword_injection: bool = True
-    enable_ai_phrase_removal: bool = True
-    enable_master_alignment_check: bool = True
-    max_refinement_passes: int = Field(default=2, ge=1, le=5)
-
-
 class KeywordGapAnalysis(BaseModel):
     """Result of keyword gap analysis."""
 

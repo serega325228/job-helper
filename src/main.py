@@ -17,7 +17,7 @@ settings = get_settings()
 
 configure_logging(settings.logging)
 
-logger = structlog.get_logger().bind(component=__name__)
+logger = get_logger()
 
 repositories = create_repositories(settings)
 services = create_services(repositories, settings)

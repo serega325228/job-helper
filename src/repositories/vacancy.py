@@ -2,6 +2,7 @@ from uuid import UUID
 
 from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.functions import func
 
 from src.infrastructure.models.vacancy import Vacancy
 from src.repositories.vacancy_filters import build_vacancy_hard_filter_conditions
@@ -30,10 +31,10 @@ class VacancyRepository:
         if not keys:
             return []
 
-        statement = select(Vacancy).where(
+        stmt = select(Vacancy).where(
             tuple_(Vacancy.source, Vacancy.external_id).in_(keys),
         )
-        result = await self._session.scalars(statement)
+        result = await self._session.scalars(stmt)
         return list(result)
 
     async def get_vacancies_by_ids(
@@ -43,8 +44,8 @@ class VacancyRepository:
         if not vacancy_ids:
             return []
 
-        statement = select(Vacancy).where(Vacancy.id.in_(vacancy_ids))
-        result = await self._session.scalars(statement)
+        stmt = select(Vacancy).where(Vacancy.id.in_(vacancy_ids))
+        result = await self._session.scalars(stmt)
         return list(result)
 
     async def list_by_hard_filters(
@@ -56,7 +57,7 @@ class VacancyRepository:
         if limit < 1:
             raise ValueError("limit must be greater than zero")
 
-        statement = (
+        stmt = (
             select(Vacancy)
             .where(*build_vacancy_hard_filter_conditions(filters))
             .order_by(
@@ -66,7 +67,7 @@ class VacancyRepository:
             )
             .limit(limit)
         )
-        result = await self._session.scalars(statement)
+        result = await self._session.scalars(stmt)
         return list(result)
 
     async def ids_by_hard_filters(
@@ -78,7 +79,7 @@ class VacancyRepository:
         if limit < 1:
             raise ValueError("limit must be greater than zero")
 
-        statement = (
+        stmt = (
             select(Vacancy.id)
             .where(*build_vacancy_hard_filter_conditions(filters))
             .order_by(
@@ -88,5 +89,13 @@ class VacancyRepository:
             )
             .limit(limit)
         )
-        result = await self._session.scalars(statement)
+        result = await self._session.scalars(stmt)
         return list(result)
+
+    async def get_amount(self) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(Vacancy)
+        )
+        result = await self._session.scalar(stmt)
+        return result if result else 0
