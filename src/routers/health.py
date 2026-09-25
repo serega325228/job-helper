@@ -1,14 +1,14 @@
 """Health check and status endpoints."""
 
 import logging
+from uuid import UUID
 
-from config.settings import LLMSettings
 from fastapi import APIRouter
 
 from dishka.integrations.fastapi import FromDishka, inject
 from infrastructure.db.engine import Database
 from infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
-from infrastructure.llm.llm import LLMProvider
+from infrastructure.llm.llm import LLMConfigManager, LLMProvider
 from sqlalchemy.orm.strategies import unitofwork
 
 from src.schemas.api import HealthResponse, StatusResponse
@@ -21,7 +21,8 @@ router = APIRouter(tags=["Health"])
 # still respond (degraded) instead of 500-ing.
 _EMPTY_DB_STATS = {
     "total_resumes": 0,
-    "total_jobs": 0,
+    "total_scrapped_vacancies": 0,
+    "total_matched_vacancies": 0,
     "total_improvements": 0,
     "has_master_resume": False,
 }
@@ -36,11 +37,13 @@ async def health_check() -> HealthResponse:
     return HealthResponse(status="healthy")
 
 
-@router.get("/status", response_model=StatusResponse)
+@router.get("/status/{profile_id}", response_model=StatusResponse)
 @inject
 async def get_status(
+    config_manager: FromDishka[LLMConfigManager],
     llm: FromDishka[LLMProvider],
-    uow: FromDishka[SqlAlchemyUnitOfWork]
+    uow: FromDishka[SqlAlchemyUnitOfWork],
+    profile_id: UUID,
 ) -> StatusResponse:
     """Get comprehensive application status.
 
@@ -51,7 +54,7 @@ async def get_status(
     llm_configured = False
     llm_healthy = False
     try:
-        config = llm.get_config()
+        config = config_manager.get()
         # ollama / openai_compatible run without a key, matching check_llm_health.
         llm_configured = config is not None and (bool(config.api_key) or config.provider in ("ollama", "openai_compatible"))
         llm_status = await llm.check_llm_health()
@@ -61,7 +64,7 @@ async def get_status(
 
     db_stats: dict = dict(_EMPTY_DB_STATS)
     try:
-        db_stats = await uow.get_stats(profile_id) #think about user id
+        db_stats = await uow.get_stats(profile_id)
     except Exception:
         logger.exception("Status: database stats failed")
 

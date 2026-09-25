@@ -1,11 +1,11 @@
-
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from infrastructure.models.resume import Resume
-from sqlalchemy.sql.expression import select
+from sqlalchemy.sql.expression import exists, select
 from sqlalchemy.sql.functions import func
+
+from infrastructure.models.resume import Resume, ResumeType
+from sqlalchemy.sql.selectable import Exists
 
 
 class ResumeRepository:
@@ -28,3 +28,13 @@ class ResumeRepository:
         )
         result = await self._session.scalar(stmt)
         return result if result else 0
+
+    async def has_master_resume(self, profile_id: UUID) -> bool:
+        stmt = select(
+            exists().where(
+                Resume.resume_type == ResumeType.MASTER
+                and Resume.profile_id == profile_id
+            )
+        )
+        result = await self._session.scalar(stmt)
+        return result if result else False

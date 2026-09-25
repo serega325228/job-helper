@@ -60,10 +60,12 @@ class SqlAlchemyUnitOfWork:
         async with self:
              resumes = await self.resumes.get_amount_by_profile_id(profile_id)
              scrapped_vacancies = await self.vacancies.get_amount()
-             matched_vacancies = self.vacancy_matches.get_amount_by_profile_id(profile_id)
+             matched_vacancies = await self.vacancy_matches.get_amount_by_profile_id(profile_id)
+             master_resume = await self.resumes.has_master_resume()
 
         return {
-            "resumes": resumes,
-            "scrapped_vacancies": scrapped_vacancies,
-            "matched_vacancies": matched_vacancies
+            "total_resumes": resumes,
+            "total_scrapped_vacancies": scrapped_vacancies,
+            "total_matched_vacancies": matched_vacancies,
+            "has_master_resume": master_resume
         }

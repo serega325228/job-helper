@@ -84,7 +84,6 @@ class RefinerService:
         master_resume: dict[str, Any],
         job_description: str,
         job_keywords: dict[str, Any],
-        config: RefinementConfig | None = None,
     ) -> RefinementResult:
         """Multi-pass refinement of an initially tailored resume.
 
@@ -98,8 +97,6 @@ class RefinerService:
         Returns:
             RefinementResult with refined data and analysis
         """
-        if config is None:
-            config = RefinementConfig()
 
         current = copy.deepcopy(initial_tailored)
         passes = 0
@@ -108,7 +105,7 @@ class RefinerService:
         alignment: AlignmentReport | None = None
 
         # Pass 1: Keyword injection (if enabled)
-        if config.enable_keyword_injection:
+        if self._settings.enable_keyword_injection:
             keyword_analysis = RefinerService.analyze_keyword_gaps(
                 job_keywords, current, master_resume
             )
@@ -130,7 +127,7 @@ class RefinerService:
                     logger.warning("Keyword injection failed: %s", e)
 
         # Pass 2: AI phrase removal and polish (local, no LLM call)
-        if config.enable_ai_phrase_removal:
+        if self._settings.enable_ai_phrase_removal:
             current, removed = RefinerService.remove_ai_phrases(
                 current, job_description
             )
@@ -141,7 +138,7 @@ class RefinerService:
 
         # Pass 3: Master alignment validation
         # LLM-008: Alignment validation is MANDATORY - not optional fallback
-        if config.enable_master_alignment_check:
+        if self._settings.enable_master_alignment_check:
             alignment = RefinerService.validate_master_alignment(
                 current,
                 master_resume,

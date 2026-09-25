@@ -6,16 +6,19 @@ import litellm
 from litellm.router import Router
 from litellm.types.router import RetryPolicy
 from pydantic import BaseModel, HttpUrl
-from schemas.llm import LLMConfig
 from structlog import get_logger
 
+from schemas.llm import LLMConfig
 from src.config.settings import LLMSettings
 
 logger = get_logger()
 
+
 class ConfigError(Exception):
     """Custom excpetion for missing/empty config"""
+
     pass
+
 
 def get_model_name(config: LLMConfig) -> str:
     provider = config.provider
@@ -39,6 +42,7 @@ def get_model_name(config: LLMConfig) -> str:
         return model
     return f"{prefix}{model}"
 
+
 def build_model_list(config: LLMConfig) -> list:
     params = {
         "model": get_model_name(config),
@@ -52,12 +56,10 @@ def build_model_list(config: LLMConfig) -> list:
     if config.api_version:
         params["api_version"] = config.api_version
 
-    model_list = {
-        "model_name": "primary",
-        "litellm_params": params
-    }
+    model_list = {"model_name": "primary", "litellm_params": params}
 
     return [model_list]
+
 
 class LLMConfigManager:
     def __init__(self, settings: LLMSettings, router: Router) -> None:
@@ -71,7 +73,12 @@ class LLMConfigManager:
             self._router.set_model_list(model_list)
             self._settings.config = config
 
+    def get(self) -> LLMConfig | None:
+        return self._settings.config
+
+
 ResponseModel = TypeVar("ResponseModel", bound=BaseModel)
+
 
 class LLMProvider:
     def __init__(self, settings: LLMSettings, router: Router) -> None:
@@ -214,7 +221,7 @@ class LLMProvider:
         Returns:
             Safe token count, clamped correctly and always >= 1.
         """
-        config = self.get_config()
+        config = self._settings.config
         if config is None:
             raise ConfigError()
 
@@ -263,13 +270,16 @@ class LLMProvider:
         # servers often run without auth, so a blank key is acceptable for those
         # providers — a sentinel is passed downstream (see _effective_api_key)
         # to satisfy the OpenAI client's non-empty-string validation.
-        config = self.get_config()
+        config = self._settings.config
         if config is None:
             return {
                 "healthy": False,
                 "error_code": "config_missing",
             }
-        if config.provider not in ("ollama", "openai_compatible") and not config.api_key:
+        if (
+            config.provider not in ("ollama", "openai_compatible")
+            and not config.api_key
+        ):
             return {
                 "healthy": False,
                 "provider": config.provider,
@@ -360,8 +370,21 @@ class LLMProvider:
                 # Scrub api-key-like tokens before surfacing the upstream error
                 # text so the Settings UI can't be used to read back even a
                 # partially-masked copy of the configured key.
-                #result["error_detail"] = _to_code_block(_scrub_secrets(message))
+                # result["error_detail"] = _to_code_block(_scrub_secrets(message))
             return result
 
-    def get_config(self) -> LLMConfig | None:
-        return self._settings.config
+    async def log_llm_health_check(self) -> None:
+        """Run a best-effort health check and log outcome without affecting API responses."""
+        config = self._settings.config
+        try:
+            health = await self.check_llm_health()
+            if not health.get("healthy", False):
+                logger.warning(
+                    "LLM config saved but health check failed",
+                    extra={"provider": config.provider, "model": config.model},
+                )
+        except Exception:
+            logger.exception(
+                "LLM config saved but health check raised exception",
+                extra={"provider": config.provider, "model": config.model},
+            )
