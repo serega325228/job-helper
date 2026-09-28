@@ -4,8 +4,8 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from repositories.resume import ResumeRepository
 from src.repositories.profile import ProfileRepository
+from src.repositories.resume import ResumeRepository
 from src.repositories.vacancy import VacancyRepository
 from src.repositories.vacancy_match import VacancyMatchRepository
 
@@ -53,19 +53,18 @@ class SqlAlchemyUnitOfWork:
     async def flush(self) -> None:
         await self._session.flush()
 
-    async def get_stats(
-        self,
-        profile_id: UUID
-    ) -> dict:
+    async def get_stats(self, profile_id: UUID) -> dict:
         async with self:
-             resumes = await self.resumes.get_amount_by_profile_id(profile_id)
-             scrapped_vacancies = await self.vacancies.get_amount()
-             matched_vacancies = await self.vacancy_matches.get_amount_by_profile_id(profile_id)
-             master_resume = await self.resumes.has_master_resume()
+            resumes = await self.resumes.get_amount_by_profile_id(profile_id)
+            scrapped_vacancies = await self.vacancies.get_amount()
+            matched_vacancies = await self.vacancy_matches.get_amount_by_profile_id(
+                profile_id
+            )
+            master_resume = await self.resumes.has_master_resume(profile_id)
 
         return {
             "total_resumes": resumes,
             "total_scrapped_vacancies": scrapped_vacancies,
             "total_matched_vacancies": matched_vacancies,
-            "has_master_resume": master_resume
+            "has_master_resume": master_resume,
         }

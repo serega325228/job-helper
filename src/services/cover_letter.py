@@ -1,35 +1,34 @@
 """Cover letter, outreach message, and resume title generation service."""
 
-import json
 import logging
-from typing import Any
 
-from infrastructure.llm.llm import LLMProvider
-from repositories.prompt import PromptRepository
-
+from src.exceptions.config import ConfigError
+from src.infrastructure.llm.llm import LLMProvider
 from src.prompts.templates import (
     COVER_LETTER_PROMPT,
     GENERATE_TITLE_PROMPT,
     OUTREACH_MESSAGE_PROMPT,
     get_language_name,
 )
+from src.repositories.prompt import PromptRepository
+from src.schemas.llm import FeatureConfig
+from src.schemas.resume import ResumeData
+
+logger = logging.getLogger(__name__)
 
 
 class CoverLetterService:
-    def __init__(
-        self,
-        llm: LLMProvider,
-        prompts: PromptRepository
-    ):
+    def __init__(self, llm: LLMProvider, prompts: PromptRepository):
         self._llm = llm
         self._prompts = prompts
 
-
     async def generate_cover_letter(
         self,
-        resume_data: dict[str, Any],
+        resume_data: ResumeData,
         job_description: str,
         language: str = "en",
+        *,
+        features: FeatureConfig,
     ) -> str:
         """Generate a cover letter based on resume and job description.
 
@@ -41,6 +40,8 @@ class CoverLetterService:
         Returns:
             Generated cover letter as plain text
         """
+        if not features.enable_cover_letter:
+            raise ConfigError("feature_disabled", field="enable_cover_letter")
         output_language = get_language_name(language)
 
         template, is_custom = self._prompts.get(
@@ -49,7 +50,7 @@ class CoverLetterService:
         try:
             prompt = template.format(
                 job_description=job_description,
-                resume_data=json.dumps(resume_data),
+                resume_data=resume_data.model_dump_json(),
                 output_language=output_language,
             )
         except (KeyError, IndexError, ValueError) as e:
@@ -61,30 +62,30 @@ class CoverLetterService:
             # warning so generation doesn't crash on out-of-band disk edits.
             if not is_custom:
                 raise
-            logging.warning(
+            logger.warning(
                 "Custom cover letter prompt failed to format (%s); falling back to default",
                 e,
             )
             prompt = COVER_LETTER_PROMPT.format(
                 job_description=job_description,
-                resume_data=json.dumps(resume_data),
+                resume_data=resume_data.model_dump_json(),
                 output_language=output_language,
             )
 
         result = await self._llm.complete(
             prompt=prompt,
             system_prompt="You are a professional career coach and resume writer. Write compelling, personalized cover letters.",
-            max_tokens=2048,
         )
 
         return result.strip()
 
-
     async def generate_outreach_message(
         self,
-        resume_data: dict[str, Any],
+        resume_data: ResumeData,
         job_description: str,
         language: str = "en",
+        *,
+        features: FeatureConfig,
     ) -> str:
         """Generate a cold outreach message for networking.
 
@@ -96,6 +97,8 @@ class CoverLetterService:
         Returns:
             Generated outreach message as plain text
         """
+        if not features.enable_outreach_message:
+            raise ConfigError("feature_disabled", field="enable_outreach_message")
         output_language = get_language_name(language)
 
         template, is_custom = self._prompts.get(
@@ -104,31 +107,29 @@ class CoverLetterService:
         try:
             prompt = template.format(
                 job_description=job_description,
-                resume_data=json.dumps(resume_data),
+                resume_data=resume_data.model_dump_json(),
                 output_language=output_language,
             )
         except (KeyError, IndexError, ValueError) as e:
             # See generate_cover_letter for rationale on the exception set.
             if not is_custom:
                 raise
-            logging.warning(
+            logger.warning(
                 "Custom outreach message prompt failed to format (%s); falling back to default",
                 e,
             )
             prompt = OUTREACH_MESSAGE_PROMPT.format(
                 job_description=job_description,
-                resume_data=json.dumps(resume_data),
+                resume_data=resume_data.model_dump_json(),
                 output_language=output_language,
             )
 
         result = await self._llm.complete(
             prompt=prompt,
             system_prompt="You are a professional networking coach. Write genuine, engaging cold outreach messages.",
-            max_tokens=1024,
         )
 
         return result.strip()
-
 
     async def generate_resume_title(
         self,
@@ -154,8 +155,6 @@ class CoverLetterService:
         result = await self._llm.complete(
             prompt=prompt,
             system_prompt="You extract job titles and company names from job descriptions.",
-            max_tokens=60,
-            temperature=0.3,
         )
 
         # Strip quotes and whitespace, truncate to 80 chars

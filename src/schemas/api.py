@@ -1,52 +1,20 @@
-from typing import Any, Literal
+from typing import Any
 
-from pydantic import BaseModel
-from schemas.llm import ReasoningEffortLiteral
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, SecretStr
+
+from src.schemas.llm import FeatureConfig, LLMConfigRequest
 
 # Config Models
 
 
-class LLMConfigRequest(BaseModel):
-    """Request to update LLM configuration."""
-
-    provider: str | None = None
-    model: str | None = None
-    api_key: str | None = None
-    api_base: str | None = None
-    # Optional reasoning-effort override.
-    #   - A valid value ("minimal"/"low"/"medium"/"high") updates the setting.
-    #   - Empty string clears the field — the server persists "" rather than
-    #     removing the key, so the gpt-5 auto-migration does not re-fire.
-    #   - None means "don't change this field".
-    # Strictly typed so invalid values are rejected at the boundary (422)
-    # rather than corrupting config.json and crashing later reads.
-    reasoning_effort: ReasoningEffortLiteral | None = None
-
-
-class LLMConfigResponse(BaseModel):
+class LLMConfigResponse(LLMConfigRequest):
     """Response for LLM configuration."""
 
-    provider: str
-    model: str
-    api_key: str  # Masked
-    api_base: str | None = None
-    reasoning_effort: ReasoningEffortLiteral | None = None
+    api_key: str
 
 
-class FeatureConfigRequest(BaseModel):
-    """Request to update feature settings."""
-
-    enable_cover_letter: bool | None = None
-    enable_outreach_message: bool | None = None
-    enable_interview_prep: bool | None = None
-
-
-class FeatureConfigResponse(BaseModel):
-    """Response for feature settings."""
-
-    enable_cover_letter: bool = False
-    enable_outreach_message: bool = False
-    enable_interview_prep: bool = False
+FeatureConfigRequest = FeatureConfig
+FeatureConfigResponse = FeatureConfig
 
 
 class LanguageConfigRequest(BaseModel):
@@ -129,16 +97,19 @@ class ApiKeyStatusResponse(BaseModel):
 class ApiKeysUpdateRequest(BaseModel):
     """Request to update API keys."""
 
-    openai: str | None = None
-    azure_foundry: str | None = None
-    anthropic: str | None = None
-    google: str | None = None
-    openrouter: str | None = None
-    deepseek: str | None = None
-    groq: str | None = None
-    # Local/self-hosted providers that may sit behind an auth proxy.
-    openai_compatible: str | None = None
-    ollama: str | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    openai: SecretStr | None = None
+    azure_foundry: SecretStr | None = None
+    anthropic: SecretStr | None = None
+    gemini: SecretStr | None = Field(
+        default=None, validation_alias=AliasChoices("gemini", "google")
+    )
+    openrouter: SecretStr | None = None
+    deepseek: SecretStr | None = None
+    groq: SecretStr | None = None
+    openai_compatible: SecretStr | None = None
+    ollama: SecretStr | None = None
 
 
 class ApiKeysUpdateResponse(BaseModel):
@@ -185,6 +156,9 @@ class StatusResponse(BaseModel):
 
     status: str
     llm_configured: bool
+    features_configured: bool
     llm_healthy: bool
+    llm_error_code: str | None = None
+    database_healthy: bool
     has_master_resume: bool
     database_stats: dict[str, Any]

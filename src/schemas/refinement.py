@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel, Field
 
+from src.schemas.resume import ResumeData
+
 
 class KeywordGapAnalysis(BaseModel):
     """Result of keyword gap analysis."""
@@ -81,24 +83,21 @@ class RefinementStats(BaseModel):
 class RefinementResult(BaseModel):
     """Complete result from the refinement process."""
 
-    refined_data: dict = Field(
-        default_factory=dict, description="The refined resume data"
-    )
+    refined_data: ResumeData
     passes_completed: int = Field(default=0, ge=0)
     keyword_analysis: KeywordGapAnalysis | None = None
     alignment_report: AlignmentReport | None = None
     ai_phrases_removed: list[str] = Field(default_factory=list)
+    keywords_injected: list[str] = Field(default_factory=list)
+    unverified_skills: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     final_match_percentage: float = Field(default=0.0, ge=0.0, le=100.0)
 
     def to_stats(self, initial_match: float = 0.0) -> RefinementStats:
         """Convert to RefinementStats for API response."""
         return RefinementStats(
             passes_completed=self.passes_completed,
-            keywords_injected=(
-                len(self.keyword_analysis.injectable_keywords)
-                if self.keyword_analysis and self.keyword_analysis.injectable_keywords
-                else 0
-            ),
+            keywords_injected=len(self.keywords_injected),
             ai_phrases_removed=self.ai_phrases_removed,
             alignment_violations_fixed=(
                 len(

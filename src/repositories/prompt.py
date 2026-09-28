@@ -1,16 +1,9 @@
-from pathlib import Path
-from config.settings import LLMSettings
-import yaml
+from src.infrastructure.llm.llm import LLMConfigManager
 
 
 class PromptRepository:
-    def __init__(self, settings: LLMSettings):
-        self.path = settings.prompts_path
-        self._prompts = self._load()
-
-    def _load(self) -> dict[str, str]:
-        with self.path.open("r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
+    def __init__(self, config_manager: LLMConfigManager):
+        self._config_manager = config_manager
 
     def get(
         self,
@@ -27,7 +20,7 @@ class PromptRepository:
         malformed custom prompt).
         """
 
-        custom = (self._prompts.get(custom_key) or "").strip()
+        custom = (self._config_manager.get_value(custom_key) or "").strip()
         if not custom:
             return default_template, False
         return custom, True

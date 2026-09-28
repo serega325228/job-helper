@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import structlog
 from dishka.integrations.fastapi import setup_dishka
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from langgraph.graph.state import CompiledStateGraph
 from pydantic.dataclasses import dataclass
@@ -12,6 +13,13 @@ from config.logging import configure_logging
 from di.container import create_container
 from src.agents.supervisor.tools import create_supervisor_tools
 from src.config.settings import get_settings
+from src.exceptions.config import ConfigError, LLMError
+from src.infrastructure.llm.llm import LLMConfigManager
+from src.routers.config import (
+    config_error_handler,
+    config_validation_error_handler,
+    llm_error_handler,
+)
 
 settings = get_settings()
 
@@ -43,6 +51,7 @@ supervisor = create_supervisor_agent(models.supervisor, tools)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await container.get(LLMConfigManager)
     # Migrate DB here
     yield
     # Shutdown - wrap each cleanup in try-except to ensure all resources are released
@@ -69,6 +78,9 @@ app = FastAPI(
 )
 
 container = create_container()
+app.add_exception_handler(ConfigError, config_error_handler)
+app.add_exception_handler(LLMError, llm_error_handler)
+app.add_exception_handler(RequestValidationError, config_validation_error_handler)
 setup_dishka(
     container=container,
     app=app,

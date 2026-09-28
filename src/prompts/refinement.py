@@ -135,50 +135,25 @@ AI_PHRASE_REPLACEMENTS: dict[str, str] = {
 
 
 # Prompt for injecting missing keywords into a resume
-KEYWORD_INJECTION_PROMPT = """Inject the following keywords into this resume by reframing the candidate's existing experience in the job description's language. Target EVERY section (summary, work experience, projects, technical skills) by default.
-
-CRITICAL RULES:
-1. Only reframe with keywords the master resume substantively supports (e.g., if the master shows "used Python for data analysis", surface "Python" and "data analysis" language)
-2. Do NOT add skills, technologies, or certifications not in the master resume
-3. Rephrase existing bullet points and content to include keywords - do not invent new content, metrics, or work history
-4. Maintain the exact same JSON structure
-5. Do not use em-dashes (—) or their variants (---, --)
-6. Make keyword incorporation the DEFAULT across all content sections, not an optional enhancement
-7. Preserve descriptionStyles arrays and keep them aligned one-to-one with description arrays
-
-Keywords to inject (only if supported by master resume):
+KEYWORD_INJECTION_PROMPT = """Propose targeted resume edits for these missing keywords:
 {keywords_to_inject}
 
-Current tailored resume:
+Return changes with path, action, original, value, and reason, plus strategy_notes.
+Use replace for summary, workExperience[i].description[j],
+personalProjects[i].description[j], or education[i].description.
+Copy original text exactly. Do not append bullets or change identity fields.
+Use add_skill only at additional.technicalSkills and only for an eligible target.
+Unverified targets have no resume evidence; never invent experience demonstrating them.
+
+Eligible skill targets:
+{skill_targets}
+
+Current resume:
 {current_resume}
 
-Master resume (source of truth):
+Master resume (source of evidence):
 {master_resume}
 
-Job description context:
+Job description (may be truncated; use only visible evidence):
 {job_description}
-
-Output the complete resume JSON with keywords naturally integrated. Return ONLY valid JSON."""
-
-
-# Prompt for validation and polish pass
-VALIDATION_POLISH_PROMPT = """Review and polish this resume content. Remove any AI-sounding language and ensure all content is truthful.
-
-REMOVE or REPLACE:
-- Buzzwords: "spearheaded", "synergy", "leverage", "orchestrated", etc.
-- Em-dashes (use commas or semicolons instead)
-- Overly formal language: "utilized" -> "used", "endeavored" -> "worked"
-- Generic filler: "in order to" -> "to"
-
-VERIFY:
-- All skills exist in the master resume
-- All certifications exist in the master resume
-- No fabricated metrics or achievements
-
-Resume to polish:
-{resume}
-
-Master resume (verify all claims against this):
-{master_resume}
-
-Output the polished resume JSON. Return ONLY valid JSON."""
+"""

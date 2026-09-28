@@ -4,22 +4,18 @@ The symmetric secret lives at ``data/.secret_key`` (auto-generated, ``chmod
 600``, gitignored). It is loaded once and used to encrypt/decrypt provider keys
 so plaintext exists in memory only at call time.
 
-Resilience: a missing secret is generated on demand; a key that fails to
-decrypt (e.g. the secret was rotated/lost) is treated as empty rather than
-crashing — the user is prompted to re-enter, and stored ciphertext is never
-recoverable without the original secret.
+Missing secrets are generated on demand. Invalid secrets and unreadable
+ciphertext raise errors without overwriting existing encryption material.
 """
 
-import logging
+from structlog import get_logger
 import os
 import tempfile
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from config.settings import Settings
-
-logger = logging.getLogger(__name__)
+logger = get_logger()
 
 
 class SecurityService:
@@ -86,17 +82,7 @@ class SecurityService:
                 # never overwrite a key that may already have encrypted data.
                 key = path.read_bytes().strip()
 
-        try:
-            self._fernet = Fernet(key)
-        except ValueError, TypeError:
-            # A corrupt/invalid secret would otherwise crash every encrypt/decrypt
-            # call. Regenerate a fresh secret (previously stored ciphertext is
-            # already unrecoverable) so key save/read flows keep working.
-            logger.warning("Invalid encryption secret at %s; regenerating.", path)
-            key = Fernet.generate_key()
-            self._write_secret(path, key)
-            self._fernet = Fernet(key)
-        return self._fernet
+        return Fernet(key)
 
     def encrypt(self, plaintext: str) -> str:
         """Encrypt a plaintext secret; returns ciphertext as a string."""
@@ -105,13 +91,10 @@ class SecurityService:
         return self._fernet.encrypt(plaintext.encode("utf-8")).decode("utf-8")
 
     def decrypt(self, ciphertext: str) -> str:
-        """Decrypt ciphertext; returns "" if it can't be decrypted (lost secret)."""
+        """Decrypt ciphertext without discarding unreadable saved keys."""
         if not ciphertext:
             return ""
         try:
             return self._fernet.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
-        except (InvalidToken, ValueError) as e:
-            logger.warning(
-                "Failed to decrypt a stored API key (secret rotated/lost?): %s", e
-            )
-            return ""
+        except InvalidToken, ValueError:
+            raise ValueError("Stored API key could not be decrypted") from None

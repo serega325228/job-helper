@@ -1,10 +1,10 @@
 import asyncio
-import logging
+from structlog import get_logger
 import os
 import sys
 from pathlib import Path
 
-from config.settings import PDFSettings
+from src.config.settings import PDFSettings
 from playwright.async_api import (
     Browser,
     Error as PlaywrightError,
@@ -12,7 +12,7 @@ from playwright.async_api import (
     Playwright,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger()
 
 # Explicit, bounded navigation/selector timeout. Chosen over Playwright's
 # implicit 30s default so a slow-but-working render (large resume, cold cache,

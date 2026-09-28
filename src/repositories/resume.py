@@ -4,8 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.expression import exists, select
 from sqlalchemy.sql.functions import func
 
-from infrastructure.models.resume import Resume, ResumeType
-from sqlalchemy.sql.selectable import Exists
+from src.infrastructure.models.resume import Resume, ResumeType
 
 
 class ResumeRepository:
@@ -32,8 +31,8 @@ class ResumeRepository:
     async def has_master_resume(self, profile_id: UUID) -> bool:
         stmt = select(
             exists().where(
-                Resume.resume_type == ResumeType.MASTER
-                and Resume.profile_id == profile_id
+                Resume.resume_type == ResumeType.MASTER,
+                Resume.profile_id == profile_id,
             )
         )
         result = await self._session.scalar(stmt)

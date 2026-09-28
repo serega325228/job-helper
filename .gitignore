@@ -11,7 +11,12 @@ wheels/
 .zed
 .models/
 data/.secret_key
+data/config.json
+data/.config.*
 data/.secre_key.tmp
 *.gguf
 *.md
-tests/
+tests/*
+!tests/test_llm_provider.py
+!tests/test_runtime_config.py
+!tests/test_resume_generation.py

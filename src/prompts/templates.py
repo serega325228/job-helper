@@ -94,72 +94,6 @@ RESUME_SCHEMA_EXAMPLE = """{
   }
 }"""
 
-# Schema for improve prompts - excludes personalInfo (preserved from original)
-IMPROVE_SCHEMA_EXAMPLE = """{
-  "summary": "Experienced software engineer with 5+ years...",
-  "workExperience": [
-    {
-      "id": 1,
-      "title": "Senior Software Engineer",
-      "company": "Tech Corp",
-      "location": "San Francisco, CA",
-      "years": "Jan 2020 - Present",
-      "description": [
-        "Led development of microservices architecture",
-        "Improved system performance by 40%"
-      ],
-      "descriptionStyles": ["bullet", "bullet"]
-    }
-  ],
-  "education": [
-    {
-      "id": 1,
-      "institution": "University of California",
-      "degree": "B.S. Computer Science",
-      "years": "2014 - 2018",
-      "description": "Graduated with honors"
-    }
-  ],
-  "personalProjects": [
-    {
-      "id": 1,
-      "name": "Open Source Tool",
-      "role": "Creator & Maintainer",
-      "years": "Mar 2021 - Present",
-      "description": [
-        "Built CLI tool with 1000+ GitHub stars",
-        "Used by 50+ companies worldwide"
-      ],
-      "descriptionStyles": ["bullet", "bullet"]
-    }
-  ],
-  "additional": {
-    "technicalSkills": ["Python", "JavaScript", "AWS", "Docker"],
-    "languages": ["English (Native)", "Spanish (Conversational)"],
-    "certificationsTraining": ["AWS Solutions Architect"],
-    "awards": ["Employee of the Year 2022"]
-  },
-  "customSections": {
-    "publications": {
-      "sectionType": "itemList",
-      "items": [
-        {
-          "id": 1,
-          "title": "Paper Title",
-          "subtitle": "Journal Name",
-          "years": "Jun 2023",
-          "description": ["Brief description of the publication"],
-          "descriptionStyles": ["bullet"]
-        }
-      ]
-    },
-    "volunteer_work": {
-      "sectionType": "text",
-      "text": "Description of volunteer activities..."
-    }
-  }
-}"""
-
 PARSE_RESUME_PROMPT = """Parse this resume into JSON. Output ONLY the JSON object, no other text.
 
 Map content to standard sections when possible. For non-standard sections (like Publications, Volunteer Work, Research, Hobbies), add them to customSections with an appropriate type.
@@ -209,131 +143,6 @@ written in the posting; use an empty string for either if it is not stated.
 Job description:
 {job_description}"""
 
-CRITICAL_TRUTHFULNESS_RULES_TEMPLATE = """CRITICAL TRUTHFULNESS RULES - NEVER VIOLATE:
-1. DO NOT add any skill, tool, technology, or certification that is not explicitly mentioned in the original resume
-2. DO NOT invent numeric achievements (e.g., "increased by 30%") unless they exist in original
-3. DO NOT add company names, product names, or technical terms not in the original
-4. DO NOT upgrade experience level (e.g., "Junior" -> "Senior")
-5. DO NOT add languages, frameworks, or platforms the candidate hasn't used
-6. DO NOT extend employment dates or change timelines. Copy date ranges exactly as they appear, including months.
-7. {rule_7}
-8. Preserve factual accuracy - only use information provided by the candidate
-9. NEVER remove existing skills, certifications, languages, or awards. You may reorder by relevance, but every original item must remain.
-
-Violation of these rules could cause serious problems for the candidate in job interviews.
-"""
-
-
-def _build_truthfulness_rules(rule_7: str) -> str:
-    return CRITICAL_TRUTHFULNESS_RULES_TEMPLATE.format(rule_7=rule_7)
-
-
-CRITICAL_TRUTHFULNESS_RULES = {
-    "nudge": _build_truthfulness_rules(
-        "DO NOT add new bullet points or content - only rephrase existing content"
-    ),
-    "keywords": _build_truthfulness_rules(
-        "You may rephrase existing bullet points to include keywords, but do NOT add new bullet points"
-    ),
-    "full": _build_truthfulness_rules(
-        "You may expand existing bullet points or add new ones that elaborate on existing work, but DO NOT invent entirely new responsibilities"
-    ),
-}
-
-IMPROVE_RESUME_PROMPT_NUDGE = """Lightly nudge this resume toward the job description. Output ONLY the JSON object, no other text.
-
-{critical_truthfulness_rules}
-
-IMPORTANT: Generate ALL text content (summary, descriptions, skills) in {output_language}.
-Do NOT include personalInfo in your output - it will be preserved from the original resume.
-
-Rules:
-- Make minimal, conservative edits only where there is a clear existing match
-- Do NOT change the candidate's role, industry, or seniority level
-- Do NOT introduce new tools, technologies, or certifications not already present
-- Do NOT add new bullet points or sections
-- Preserve original bullet count and ordering within each section
-- Preserve descriptionStyles arrays and keep them aligned one-to-one with description arrays
-- Keep proper nouns (names, company names, locations) unchanged
-- For customSections: preserve exact structure, item count, titles, subtitles, and years. If an item's description is an empty array [] in the original, keep it empty []. Do NOT generate descriptions for items that had none.
-- Copy the "years" field values EXACTLY as they appear in the original resume (including any month prefixes like "Jan 2020 - Present"). Do not shorten, reformat, or drop months.
-- If the resume is non-technical, do NOT add technical jargon
-- Do NOT use em dash ("—") anywhere in the writing/output, even if it exists, remove it
-
-Job Description:
-{job_description}
-
-Keywords to emphasize (only if already supported by resume content):
-{job_keywords}
-
-Original Resume:
-{original_resume}
-
-Output in this JSON format:
-{schema}"""
-
-IMPROVE_RESUME_PROMPT_KEYWORDS = """Enhance this resume with relevant keywords from the job description. Output ONLY the JSON object, no other text.
-
-{critical_truthfulness_rules}
-
-IMPORTANT: Generate ALL text content (summary, descriptions, skills) in {output_language}.
-Do NOT include personalInfo in your output - it will be preserved from the original resume.
-
-Rules:
-- Strengthen alignment by weaving in relevant keywords where evidence already exists
-- You may rephrase bullet points to include keyword phrasing
-- Do NOT introduce new skills, tools, or certifications not in the resume
-- Do NOT change role, industry, or seniority level
-- Preserve descriptionStyles arrays and keep them aligned one-to-one with description arrays
-- For customSections: preserve exact structure, item count, titles, subtitles, and years. If an item's description is an empty array [] in the original, keep it empty []. Do NOT generate descriptions for items that had none.
-- Copy the "years" field values EXACTLY as they appear in the original resume (including any month prefixes like "Jan 2020 - Present"). Do not shorten, reformat, or drop months.
-- If resume is non-technical, keep language non-technical while still aligning keywords
-- Do NOT use em dash ("—") anywhere in the writing/output, even if it exists, remove it
-
-Job Description:
-{job_description}
-
-Keywords to emphasize:
-{job_keywords}
-
-Original Resume:
-{original_resume}
-
-Output in this JSON format:
-{schema}"""
-
-IMPROVE_RESUME_PROMPT_FULL = """Tailor this resume for the job. Output ONLY the JSON object, no other text.
-
-{critical_truthfulness_rules}
-
-IMPORTANT: Generate ALL text content (summary, descriptions, skills) in {output_language}.
-Do NOT include personalInfo in your output - it will be preserved from the original resume.
-
-Rules:
-- Make targeted adjustments to bullet points to align with job description phrasing. Preserve the candidate's original details and voice - adjust wording, do not rewrite entirely.
-- DO NOT invent new information
-- Preserve existing action verbs. Do not invent quantifiable achievements not in the original.
-- Keep proper nouns (names, company names, locations) unchanged
-- Translate job titles, descriptions, and skills to {output_language}
-- Preserve descriptionStyles arrays and keep them aligned one-to-one with description arrays
-- For customSections: preserve exact structure, item count, titles, subtitles, and years. If an item's description is an empty array [] in the original, keep it empty []. Do NOT generate descriptions for items that had none.
-- Improve custom section content the same way as standard sections
-- Copy the "years" field values EXACTLY as they appear in the original resume (including any month prefixes like "Jan 2020 - Present"). Do not shorten, reformat, or drop months.
-- Calculate and emphasize total relevant experience duration when it matches requirements
-- Do NOT use em dash ("—") anywhere in the writing/output, even if it exists, remove it
-
-Job Description:
-{job_description}
-
-Keywords to emphasize:
-{job_keywords}
-
-Original Resume:
-{original_resume}
-
-Output in this JSON format:
-{schema}"""
-
 IMPROVE_PROMPT_OPTIONS = [
     {
         "id": "nudge",
@@ -352,16 +161,9 @@ IMPROVE_PROMPT_OPTIONS = [
     },
 ]
 
-IMPROVE_RESUME_PROMPTS = {
-    "nudge": IMPROVE_RESUME_PROMPT_NUDGE,
-    "keywords": IMPROVE_RESUME_PROMPT_KEYWORDS,
-    "full": IMPROVE_RESUME_PROMPT_FULL,
-}
-
 DEFAULT_IMPROVE_PROMPT_ID = "keywords"
 
 # Backward-compatible alias
-IMPROVE_RESUME_PROMPT = IMPROVE_RESUME_PROMPT_FULL
 
 COVER_LETTER_PROMPT = """Write a brief cover letter for this job application.
 
@@ -486,44 +288,9 @@ RESUME_SCHEMA = RESUME_SCHEMA_EXAMPLE
 
 DIFF_STRATEGY_INSTRUCTIONS = {
     "nudge": "Make minimal edits. Only rephrase where there is a clear match. Do not add new bullet points.",
-    "keywords": "Weave in relevant keywords where evidence already exists. You may rephrase bullets but do not add new ones.",
-    "full": "Make targeted adjustments. You may rephrase bullets, add verified JD skills, and add new bullets that elaborate on existing work, but do not invent new responsibilities.",
+    "keywords": "Weave in relevant keywords where evidence already exists. You may rephrase bullets and add eligible skills to the skills list, but do not add new bullets.",
+    "full": "Make targeted adjustments. You may rephrase bullets, add eligible skills to the skills list, and add new bullets that elaborate on existing work, but do not invent new responsibilities.",
 }
-
-SKILL_TARGET_PLAN_PROMPT = """Build a concise skill target plan for tailoring this resume to the job.
-
-Return ONLY a JSON object. Do not rewrite the resume.
-
-Rules:
-1. Prefer required and preferred JD skills.
-2. Include existing resume skills that are highly relevant to the JD.
-3. You may include JD skills that are missing from the resume skills list.
-4. Do not include skills unrelated to the JD.
-5. Do not include certifications.
-6. Generate reasons in {output_language}.
-
-Existing resume skills:
-{existing_skills}
-
-JD keywords and skills:
-{job_keywords}
-
-Job Description:
-{job_description}
-
-Resume JSON:
-{original_resume}
-
-Output this exact JSON format:
-{{
-  "target_skills": [
-    {{
-      "skill": "skill name",
-      "reason": "why this skill should be emphasized"
-    }}
-  ],
-  "strategy_notes": "brief notes for the next editing pass"
-}}"""
 
 DIFF_IMPROVE_PROMPT = """Given this resume and job description, output a JSON object with targeted changes to better align the resume with the job.
 
@@ -537,7 +304,7 @@ RULES:
 7. Generate all new text in {output_language}
 8. Do not use em dash characters
 9. Keep changes minimal and targeted; do not rewrite content that already aligns well
-10. Exception to rule 2: you may add a skill only if it appears in the verified skill targets below
+10. You may add a skill to additional.technicalSkills only if it appears in the eligible targets below. Targets marked unverified have no resume evidence: never describe them as demonstrated work experience.
 11. By DEFAULT, scan the summary and every work, project, and education description for content that already demonstrates a job-description keyword or skill, and reframe that text using the job description's terminology where it is not already phrased that way (per rule 9, leave content that already aligns well), while preserving the candidate's actual accomplishment. Do NOT add new work, metrics, or responsibilities; only restate existing content in the JD's language, and verify every reframe stays factually accurate.
 12. Preserve original capitalization, especially for proper nouns, technical terms (e.g., REST, API, AWS), and acronyms. Do not change the casing of words that were capitalized in the original.
 
@@ -558,7 +325,7 @@ Do NOT target: personalInfo, dates/years, company names, education degree/instit
 Keywords to emphasize (only if already supported by resume content):
 {job_keywords}
 
-Verified skill targets:
+Eligible skill targets (unverified means no resume evidence):
 {skill_targets}
 
 Job Description:

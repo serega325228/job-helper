@@ -2,32 +2,35 @@ from collections.abc import AsyncIterator, Iterator
 
 import httpx
 from dishka import Provider, Scope, provide
-from infrastructure.pdf.pdf import PDFRender
-from litellm import RetryPolicy
-from litellm.router import Router
-from playwright.async_api import Browser, Playwright, async_playwright
-from services.refiner import RefinerService
+from playwright.async_api import Playwright, async_playwright
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from repositories.prompt import PromptRepository
-from services.cover_letter import CoverLetterService
-from services.sercurity import SecurityService
-from src.config.settings import Settings
+from src.config.settings import Settings, get_settings
+from src.exceptions.config import ConfigError
 from src.infrastructure.db.engine import Database
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
-from src.infrastructure.llm.llm import LLMConfigManager, LLMProvider, build_model_list
+from src.infrastructure.llm.llm import LLMConfigManager, LLMProvider
 from src.infrastructure.llm.profile_analyzer import ProfileAnalyzer
 from src.infrastructure.llm.vacancy_analyzer import VacancyAnalyzer
+from src.infrastructure.pdf.pdf import PDFRender
 from src.infrastructure.reranker.vacancy_reranker import VacancyReranker
 from src.infrastructure.vacancy_sources.hh.client import HhApiClient
 from src.infrastructure.vacancy_sources.hh.source import HhVacancySource
 from src.ports.vacancy_normalizer import VacancyNormalizer
 from src.repositories.profile import ProfileRepository
+from src.repositories.prompt import PromptRepository
+from src.repositories.resume import ResumeRepository
 from src.repositories.vacancy import VacancyRepository
 from src.repositories.vacancy_match import VacancyMatchRepository
+from src.schemas.llm import FeatureConfig
+from src.services.cover_letter import CoverLetterService
 from src.services.embedding import EmbeddingService
+from src.services.improver import ImproverService
+from src.services.interview_prep import InterviewPrepService
 from src.services.profile import ProfileService
+from src.services.refiner import RefinerService
 from src.services.scoring import ScoringService
+from src.services.sercurity import SecurityService
 from src.services.skill_canonicalization import SkillCanonicalizer
 from src.services.vacancy import VacancyService
 from src.services.vacancy_match import VacancyMatchService
@@ -36,7 +39,7 @@ from src.services.vacancy_match import VacancyMatchService
 class ConfigProvider(Provider):
     @provide(scope=Scope.APP)
     def settings(self) -> Settings:
-        return Settings()
+        return get_settings()
 
 
 class InfrastructureProvider(Provider):
@@ -68,37 +71,23 @@ class InfrastructureProvider(Provider):
             yield client
 
     @provide(scope=Scope.APP)
-    async def llm_config_manager(self, settings: Settings, router: Router) -> LLMConfigManager:
-        return LLMConfigManager(
-            settings.llm,
-            router,
-        )
-
-    @provide(scope=Scope.APP)
-    async def llm_router(self, settings: Settings) -> Router:
-        config = settings.llm.config
-        model_list = []
-        if config is not None:
-            model_list = build_model_list(config)
-
-        retries = settings.llm.max_retries
-        return Router(
-            model_list=model_list,
-            num_retries=retries,
-            retry_policy=RetryPolicy(
-                AuthenticationErrorRetries=0,
-                BadRequestErrorRetries=0,
-                TimeoutErrorRetries=min(retries, 2),
-                RateLimitErrorRetries=retries,
-                ContentPolicyViolationErrorRetries=0,
-                InternalServerErrorRetries=min(retries, 2),
-            ),
-            disable_cooldowns=True,
-        )
+    def llm_config_manager(
+        self, settings: Settings, security: SecurityService
+    ) -> LLMConfigManager:
+        return LLMConfigManager(settings, security)
 
     @provide(scope=Scope.REQUEST)
-    def llm_provider(self, settings: Settings, router: Router) -> LLMProvider:
-        return LLMProvider(settings.llm, router)
+    def llm_provider(
+        self, settings: Settings, config_manager: LLMConfigManager
+    ) -> LLMProvider:
+        return LLMProvider(settings.llm, config_manager.get())
+
+    @provide(scope=Scope.REQUEST)
+    def feature_config(self, config_manager: LLMConfigManager) -> FeatureConfig:
+        features = config_manager.get_features()
+        if features is None:
+            raise ConfigError(field="features")
+        return features
 
     @provide(scope=Scope.APP)
     def hh_client(
@@ -120,10 +109,10 @@ class InfrastructureProvider(Provider):
         scope=Scope.REQUEST,
     )
     hh_source = provide(HhVacancySource, scope=Scope.APP)
-    profile_analyzer = provide(ProfileAnalyzer, scope=Scope.APP)
+    profile_analyzer = provide(ProfileAnalyzer, scope=Scope.REQUEST)
     vacancy_normalizer = provide(
         VacancyAnalyzer,
-        scope=Scope.APP,
+        scope=Scope.REQUEST,
         provides=VacancyNormalizer,
     )
 
@@ -150,6 +139,7 @@ class InfrastructureProvider(Provider):
 
 
 class RepositoryProvider(Provider):
+    resume_repository = provide(ResumeRepository, scope=Scope.REQUEST)
     profile_repository = provide(ProfileRepository, scope=Scope.REQUEST)
     vacancy_repository = provide(VacancyRepository, scope=Scope.REQUEST)
     vacancy_match_repository = provide(VacancyMatchRepository, scope=Scope.REQUEST)
@@ -157,6 +147,8 @@ class RepositoryProvider(Provider):
 
 
 class ServiceProvider(Provider):
+    improver_service = provide(ImproverService, scope=Scope.REQUEST)
+    interview_prep_service = provide(InterviewPrepService, scope=Scope.REQUEST)
     profile_service = provide(ProfileService, scope=Scope.REQUEST)
     vacancy_service = provide(VacancyService, scope=Scope.REQUEST)
     vacancy_match_service = provide(VacancyMatchService, scope=Scope.REQUEST)
@@ -203,9 +195,10 @@ class ServiceProvider(Provider):
 
     @provide(scope=Scope.REQUEST)
     def refiner_service(
-        self, provider: LLMProvider, settings: Settings
+        self, provider: LLMProvider, settings: Settings, improver: ImproverService
     ) -> RefinerService:
         return RefinerService(
             provider,
-            settings.refiner
+            settings.refiner,
+            improver,
         )

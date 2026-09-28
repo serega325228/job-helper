@@ -1,18 +1,16 @@
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
 
 from pydantic import (
-    AliasChoices,
-    BaseModel,
     Field,
-    HttpUrl,
+    PrivateAttr,
     SecretStr,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from schemas.llm import LLMConfig
 from sqlalchemy import URL
+
+from src.schemas.llm import FeatureConfig, LLMConfig
 
 
 class Environment(StrEnum):
@@ -28,6 +26,7 @@ class LogLevel(StrEnum):
     WARNING = "WARNING"
     ERROR = "ERROR"
     CRITICAL = "CRITICAL"
+
 
 class LogFormat(StrEnum):
     CONSOLE = "console"
@@ -78,6 +77,7 @@ class DatabaseSettings(BaseSettings):
             database=self.database,
         )
 
+
 class EmbeddingSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="EMBEDDING_",
@@ -85,18 +85,21 @@ class EmbeddingSettings(BaseSettings):
         extra="ignore",
     )
 
-    model_path: Path = Path(__file__).parent.parent.parent / ".models" / "embeddinggemma-300M-Q8_0.gguf"
+    model_path: Path = (
+        Path(__file__).parent.parent.parent
+        / ".models"
+        / "embeddinggemma-300M-Q8_0.gguf"
+    )
 
     @property
     def resolved_model_path(self) -> Path:
         path = self.model_path.expanduser().resolve()
 
         if not path.is_file():
-            raise FileNotFoundError(
-                f"Embedding model not found: {path}"
-            )
+            raise FileNotFoundError(f"Embedding model not found: {path}")
 
         return path
+
 
 class LLMSettings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -106,18 +109,23 @@ class LLMSettings(BaseSettings):
         extra="ignore",
     )
 
-    config: LLMConfig | None = None
-
-    temperature: float = Field(default=0.2, ge=0, le=2)
-    max_tokens: int = Field(default=4096, ge=1)
-
-    prompts_path: Path = Path(__file__).parent.parent.parent / "data" / "config.yaml"
+    _config: LLMConfig | None = PrivateAttr(default=None)
 
     request_timeout_seconds: float = Field(default=60.0, gt=0)
     max_retries: int = Field(default=2, ge=0)
 
+    @property
+    def config(self) -> LLMConfig | None:
+        return self._config
+
+    @config.setter
+    def config(self, value: LLMConfig | None) -> None:
+        self._config = value
+
+
 class RefinerSettings(BaseSettings):
     """Configuration for refinement passes."""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -128,7 +136,7 @@ class RefinerSettings(BaseSettings):
     enable_keyword_injection: bool = Field(default=True)
     enable_ai_phrase_removal: bool = Field(default=True)
     enable_master_alignment_check: bool = Field(default=True)
-    max_refinement_passes: int = Field(default=2, ge=1, le=5)
+
 
 class PDFSettings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -139,6 +147,7 @@ class PDFSettings(BaseSettings):
     )
 
     max_concurrency: int = Field(default=4, gt=0)
+
 
 class RerankerSettings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -190,7 +199,9 @@ class LoggingSettings(BaseSettings):
     )
     backup_count: int = Field(default=5, ge=0)
 
+
 class Settings(BaseSettings):
+    _features: FeatureConfig | None = PrivateAttr(default=None)
     app: AppSettings = AppSettings()
     database: DatabaseSettings = DatabaseSettings()
     llm: LLMSettings = LLMSettings()
@@ -211,6 +222,14 @@ class Settings(BaseSettings):
         extra="ignore",
         validate_default=True,
     )
+
+    @property
+    def features(self) -> FeatureConfig | None:
+        return self._features
+
+    @features.setter
+    def features(self, value: FeatureConfig | None) -> None:
+        self._features = value
 
     @property
     def is_production(self) -> bool:

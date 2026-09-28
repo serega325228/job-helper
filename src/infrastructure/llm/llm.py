@@ -1,102 +1,278 @@
 import asyncio
+import copy
+import json
+from structlog import get_logger
+import os
 import re
-from typing import Any, Literal, TypeVar, overload
+import tempfile
+from pathlib import Path
+from typing import Any, TypeVar, overload
 
 import litellm
-from litellm.router import Router
-from litellm.types.router import RetryPolicy
-from pydantic import BaseModel, HttpUrl
-from structlog import get_logger
+from openai import OpenAIError
+from pydantic import BaseModel, SecretStr, ValidationError
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
-from schemas.llm import LLMConfig
-from src.config.settings import LLMSettings
+from src.config.settings import LLMSettings, Settings
+from src.exceptions.config import ConfigError, LLMError
+from src.schemas.llm import (
+    LOCAL_PROVIDERS,
+    PROVIDERS,
+    FeatureConfig,
+    LLMConfig,
+    LLMConfigRequest,
+    LLMHealth,
+    LLMTestRequest,
+)
+from src.services.sercurity import SecurityService
 
 logger = get_logger()
 
+_PROVIDER_PREFIXES = {
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "azure_foundry": "azure_ai",
+    "deepseek": "deepseek",
+    "gemini": "gemini",
+    "groq": "groq",
+    "ollama": "ollama_chat",
+    "openai_compatible": "openai",
+    "openrouter": "openrouter",
+}
+_PROVIDER_ENDPOINTS = {
+    "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com",
+    "deepseek": "https://api.deepseek.com",
+    "gemini": "https://generativelanguage.googleapis.com",
+    "groq": "https://api.groq.com/openai/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+}
 
-class ConfigError(Exception):
-    """Custom excpetion for missing/empty config"""
 
-    pass
-
-
-def get_model_name(config: LLMConfig) -> str:
-    provider = config.provider
+def get_model_name(config: LLMConfigRequest) -> str:
+    prefix = _PROVIDER_PREFIXES[config.provider] + "/"
     model = config.model
-    prefixes = {
-        "anthropic": "anthropic/",
-        "azure_foundry": "azure_ai/",
-        "deepseek": "deepseek/",
-        "gemini": "gemini/",
-        "groq": "groq/",
-        "ollama": "ollama_chat/",
-        "openai_compatible": "openai/",
-        "openrouter": "openrouter/",
-    }
-    prefix = prefixes.get(provider, "")
-    aliases = {
-        "azure_foundry": ("azure/",),
-        "ollama": ("ollama/",),
-    }
-    if not prefix or model.startswith((prefix, *aliases.get(provider, ()))):
-        return model
-    return f"{prefix}{model}"
+    if config.provider == "ollama":
+        model = model.removeprefix("ollama/")
+    elif config.provider == "azure_foundry":
+        model = model.removeprefix("azure/")
+    return model if model.startswith(prefix) else prefix + model
 
 
-def build_model_list(config: LLMConfig) -> list:
-    params = {
-        "model": get_model_name(config),
-        "api_key": config.api_key,
-    }
-
-    if config.api_base:
-        params["api_base"] = config.api_base
-    if config.reasoning_effort:
-        params["reasoning_effort"] = config.reasoning_effort
-    if config.api_version:
-        params["api_version"] = config.api_version
-
-    model_list = {"model_name": "primary", "litellm_params": params}
-
-    return [model_list]
+def validate_llm_config(config: LLMConfigRequest) -> None:
+    model = get_model_name(config)
+    try:
+        supported = litellm.get_supported_openai_params(
+            model=model,
+            custom_llm_provider=_PROVIDER_PREFIXES[config.provider],
+        )
+    except OpenAIError, ValueError, KeyError:
+        supported = None
+    if supported is not None:
+        for field in ("temperature", "reasoning_effort"):
+            if getattr(config, field) is not None and field not in supported:
+                raise ConfigError("unsupported_parameter", field=field, status_code=422)
+    info = (
+        litellm.model_cost.get(model)
+        or litellm.model_cost.get(model.removeprefix("openai/"))
+        or {}
+    )
+    limit = info.get("max_output_tokens") or info.get("max_tokens")
+    if isinstance(limit, int) and limit > 0 and config.max_tokens > limit:
+        raise ConfigError(
+            "token_budget_exceeds_model_limit", field="max_tokens", status_code=422
+        )
 
 
 class LLMConfigManager:
-    def __init__(self, settings: LLMSettings, router: Router) -> None:
+    def __init__(self, settings: Settings, security: SecurityService) -> None:
         self._settings = settings
-        self._router = router
+        self._security = security
+        self._path = settings.app.data_dir / "config.json"
+        # ponytail: one process owns this file; multiple workers need a shared transactional store.
         self._lock = asyncio.Lock()
+        try:
+            self._stored = json.loads(self._path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            self._stored = {}
+        except OSError, ValueError:
+            raise ConfigError("config_file_unreadable", status_code=503) from None
+        config, features = self._validate_stored(self._stored)
+        self._settings.llm.config = config
+        self._settings.features = features
 
-    async def update(self, config: LLMConfig):
-        model_list = build_model_list(config)
-        async with self._lock:
-            self._router.set_model_list(model_list)
-            self._settings.config = config
+    def _keys(self, stored: dict[str, Any]) -> dict[str, SecretStr]:
+        encrypted = stored.get("api_keys", {})
+        if not isinstance(encrypted, dict):
+            raise ConfigError("invalid_key_store", status_code=503)
+        keys: dict[str, SecretStr] = {}
+        for provider, ciphertext in encrypted.items():
+            name = "gemini" if provider == "google" else provider
+            if name not in PROVIDERS or not isinstance(ciphertext, str):
+                raise ConfigError("invalid_key_store", status_code=503)
+            try:
+                keys[name] = SecretStr(self._security.decrypt(ciphertext))
+            except ValueError:
+                raise ConfigError(
+                    "api_key_decryption_failed", field=name, status_code=503
+                ) from None
+        return keys
+
+    def _validate_stored(
+        self, stored: dict[str, Any]
+    ) -> tuple[LLMConfig | None, FeatureConfig | None]:
+        if not isinstance(stored, dict):
+            raise ConfigError("invalid_config_file", status_code=503)
+        keys = self._keys(stored)
+        try:
+            raw_config = stored.get("llm")
+            config = None
+            if raw_config is not None:
+                request = LLMConfigRequest.model_validate(raw_config)
+                config = LLMConfig(
+                    **request.model_dump(),
+                    api_key=keys.get(request.provider),
+                )
+            raw_features = stored.get("features")
+            features = (
+                FeatureConfig.model_validate(raw_features)
+                if raw_features is not None
+                else None
+            )
+        except ValidationError:
+            raise ConfigError("invalid_config_file", status_code=503) from None
+        return config, features
+
+    def _save(self, stored: dict[str, Any]) -> None:
+        temporary: Path | None = None
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, filename = tempfile.mkstemp(
+                dir=self._path.parent, prefix=".config."
+            )
+            temporary = Path(filename)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump(stored, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self._path)
+        except OSError:
+            raise ConfigError("config_save_failed", status_code=503) from None
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    def _commit(self, stored: dict[str, Any]) -> None:
+        config, features = self._validate_stored(stored)
+        self._save(stored)
+        self._stored = stored
+        self._settings.llm.config = config
+        self._settings.features = features
 
     def get(self) -> LLMConfig | None:
-        return self._settings.config
+        config = self._settings.llm.config
+        return config.model_copy(deep=True) if config is not None else None
+
+    def get_features(self) -> FeatureConfig | None:
+        return self._settings.features
+
+    def get_value(self, name: str, default: Any = None) -> Any:
+        return copy.deepcopy(self._stored.get(name, default))
+
+    def get_api_keys(self) -> dict[str, SecretStr]:
+        return self._keys(self._stored)
+
+    def resolve(self, request: LLMConfigRequest | LLMTestRequest) -> LLMConfig:
+        override = request.api_key if isinstance(request, LLMTestRequest) else None
+        key = (
+            override
+            if override is not None
+            else self.get_api_keys().get(request.provider)
+        )
+        config = LLMConfig(**request.model_dump(exclude={"api_key"}), api_key=key)
+        self.require_credentials(config)
+        validate_llm_config(config)
+        return config
+
+    @staticmethod
+    def require_credentials(config: LLMConfig) -> None:
+        if config.provider not in LOCAL_PROVIDERS and (
+            config.api_key is None or not config.api_key.get_secret_value().strip()
+        ):
+            raise ConfigError("api_key_required", field="api_key", status_code=422)
+
+    async def update(self, request: LLMConfigRequest) -> LLMConfig:
+        async with self._lock:
+            config = self.resolve(request)
+            self._commit(self._stored | {"llm": config.model_dump(mode="json")})
+            return config
+
+    async def update_features(self, features: FeatureConfig) -> FeatureConfig:
+        async with self._lock:
+            self._commit(self._stored | {"features": features.model_dump(mode="json")})
+        return features
+
+    async def update_values(self, values: dict[str, str]) -> None:
+        if set(values) & {"llm", "features", "api_keys"}:
+            raise ValueError("Use the typed configuration update methods")
+        async with self._lock:
+            self._commit(self._stored | values)
+
+    async def update_api_keys(self, updates: dict[str, SecretStr | None]) -> None:
+        async with self._lock:
+            encrypted = dict(self._stored.get("api_keys", {}))
+            if "google" in encrypted:
+                encrypted.setdefault("gemini", encrypted.pop("google"))
+            for provider, secret in updates.items():
+                name = "gemini" if provider == "google" else provider
+                if name not in PROVIDERS:
+                    raise ConfigError(
+                        "unsupported_provider", field="provider", status_code=422
+                    )
+                plaintext = (
+                    secret.get_secret_value().strip() if secret is not None else ""
+                )
+                if plaintext:
+                    encrypted[name] = self._security.encrypt(plaintext)
+                else:
+                    encrypted.pop(name, None)
+            self._commit(self._stored | {"api_keys": encrypted})
+
+    async def clear_api_keys(self) -> None:
+        async with self._lock:
+            self._commit(self._stored | {"api_keys": {}})
 
 
 ResponseModel = TypeVar("ResponseModel", bound=BaseModel)
 
 
+class _HealthProbe(BaseModel):
+    ok: bool
+
+
 class LLMProvider:
-    def __init__(self, settings: LLMSettings, router: Router) -> None:
-        self._settings = settings
-        litellm.drop_params = True
-        litellm.modify_params = True
-        self._router = router
-        self._model_name = get_model_name(settings.config) if settings.config else ""
+    def __init__(self, settings: LLMSettings, config: LLMConfig | None) -> None:
+        self._config = config.model_copy(deep=True) if config is not None else None
+        self._timeout = settings.request_timeout_seconds
+        self._max_retries = settings.max_retries
+
+    @property
+    def configured(self) -> bool:
+        return self._config is not None and (
+            self._config.provider in LOCAL_PROVIDERS
+            or bool(
+                self._config.api_key and self._config.api_key.get_secret_value().strip()
+            )
+        )
 
     @overload
     async def complete(
-        self,
-        prompt: str,
-        system_prompt: str | None = None,
-        *,
-        schema: None = None,
-        max_tokens: int = 4096,
-        temperature: float = 0.3,
+        self, prompt: str, system_prompt: str | None = None, *, schema: None = None
     ) -> str: ...
 
     @overload
@@ -106,8 +282,6 @@ class LLMProvider:
         system_prompt: str | None = None,
         *,
         schema: type[ResponseModel],
-        max_tokens: int = 4096,
-        temperature: float = 0.3,
     ) -> ResponseModel: ...
 
     async def complete(
@@ -116,65 +290,92 @@ class LLMProvider:
         system_prompt: str | None = None,
         *,
         schema: type[ResponseModel] | None = None,
-        max_tokens: int = 4096,
-        temperature: float = 0.3,
     ) -> str | ResponseModel:
-        if self._settings.config is None:
-            raise ConfigError()
+        return await self._complete(prompt, system_prompt, schema=schema)
 
-        messages: list[dict[str, str]] = []
+    async def _complete(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        *,
+        schema: type[ResponseModel] | None = None,
+        token_limit: int | None = None,
+    ) -> str | ResponseModel:
+        config = self._config
+        if not self.configured or config is None:
+            raise ConfigError(field="llm")
+        validate_llm_config(config)
+        messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
-
-        request = {
-            "model": "primary",
+        key = config.api_key.get_secret_value() if config.api_key else "not-required"
+        request: dict[str, Any] = {
+            "model": get_model_name(config),
+            "custom_llm_provider": _PROVIDER_PREFIXES[config.provider],
             "messages": messages,
-            "max_tokens": max_tokens,
-            "timeout": self._settings.request_timeout_seconds,
+            "api_key": key,
+            "api_base": str(config.api_base)
+            if config.api_base
+            else _PROVIDER_ENDPOINTS[config.provider],
+            "max_tokens": min(config.max_tokens, token_limit)
+            if token_limit
+            else config.max_tokens,
+            "timeout": self._timeout,
+            "num_retries": 0,
+            "max_retries": 0,
+            "drop_params": False,
         }
-        if self._supports_temperature(self._model_name):
-            request["temperature"] = temperature
-        if self._settings.config.reasoning_effort:
-            request["reasoning_effort"] = self._settings.config.reasoning_effort
+        for field in ("temperature", "reasoning_effort", "api_version"):
+            value = getattr(config, field)
+            if value is not None:
+                request[field] = value
         if schema is not None:
             request["response_format"] = schema
-
         try:
-            response = await self._router.acompletion(**request)
-            content = self._extract_content(response.choices[0].message.content)
-            content = self._strip_thinking_tags(content)
+            async for attempt in AsyncRetrying(
+                retry=retry_if_exception_type(
+                    (
+                        litellm.Timeout,
+                        litellm.RateLimitError,
+                        litellm.APIConnectionError,
+                        litellm.InternalServerError,
+                    )
+                ),
+                stop=stop_after_attempt(self._max_retries + 1),
+                wait=wait_exponential(multiplier=0.5, max=4),
+                reraise=True,
+            ):
+                with attempt:
+                    response = await litellm.acompletion(**request)
+            choice = response.choices[0]
+            if getattr(choice, "finish_reason", None) == "length":
+                raise LLMError("output_truncated")
+            content = self._extract_content(choice.message.content)
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
+            content = re.sub(r"<think>.*", "", content, flags=re.DOTALL).strip()
             if not content:
-                raise ValueError("LLM returned an empty response")
-
-            if schema is None:
-                return content
-            return schema.model_validate_json(content)
-        except Exception as error:
-            logger.exception("LLM completion failed for model %s", self._model_name)
-            raise ValueError("LLM completion failed") from error
-
-    # @staticmethod
-    # def _normalize_api_base(config: LLMConfig) -> str:
-    #     base_url = config.api_base.rstrip("/")
-    #     if config.provider in {"anthropic", "gemini", "openrouter"}:
-    #         return base_url.removesuffix("/v1")
-    #     if config.provider == "ollama":
-    #         for suffix in ("/api/generate", "/api/chat", "/api", "/v1"):
-    #             if base_url.endswith(suffix):
-    #                 return base_url.removesuffix(suffix)
-    #     return base_url
-
-    @staticmethod
-    def _supports_temperature(model_name: str) -> bool:
-        if model_name.startswith(("ollama/", "ollama_chat/")):
-            return True
-        try:
-            model_info = litellm.get_model_info(model=model_name)
-        except Exception:
-            return False
-        supported_params = model_info.get("supported_openai_params", [])
-        return "temperature" in supported_params
+                raise LLMError("empty_output")
+            return content if schema is None else schema.model_validate_json(content)
+        except LLMError:
+            raise
+        except ValidationError:
+            raise LLMError("invalid_structured_output") from None
+        except OpenAIError as error:
+            if isinstance(error, litellm.AuthenticationError):
+                code = "authentication_failed"
+            elif isinstance(error, litellm.Timeout):
+                code = "timeout"
+            elif isinstance(error, litellm.RateLimitError):
+                code = "rate_limited"
+            elif isinstance(error, litellm.UnsupportedParamsError):
+                code = "unsupported_parameter"
+            elif isinstance(error, litellm.BadRequestError):
+                code = "invalid_provider_request"
+            else:
+                code = "provider_unavailable"
+            logger.warning("LLM request failed: %s (%s)", code, type(error).__name__)
+            raise LLMError(code) from None
 
     @staticmethod
     def _extract_content(content: Any) -> str:
@@ -182,8 +383,7 @@ class LLMProvider:
             return content
         if not isinstance(content, list):
             return ""
-
-        parts: list[str] = []
+        parts = []
         for part in content:
             if isinstance(part, str):
                 parts.append(part)
@@ -193,198 +393,33 @@ class LLMProvider:
                 parts.append(part.text)
         return "\n".join(parts)
 
-    @staticmethod
-    def _strip_thinking_tags(content: str) -> str:
-        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
-        return re.sub(r"<think>.*", "", content, flags=re.DOTALL).strip()
-
-    def get_safe_max_tokens(
-        self,
-        requested: int | None = None,
-    ) -> int:
-        """Return a token count safe for the given model, clamped to its output limit.
-
-        Queries LiteLLM's model registry for ``max_output_tokens`` and returns
-        ``min(requested, model_limit)`` so callers never send a value that exceeds
-        what the backend actually supports.
-
-        If the model is not in the registry (e.g. custom Ollama models), it falls
-        back to a conservative limit. The verified OpenCode Zen HY3 route is an
-        exception because JSON extraction disables reasoning for that model and
-        needs the full structured-output budget.
-
-        Args:
-            model_name: LiteLLM-formatted model name (from get_model_name).
-            requested: Desired token budget; defaults to DEFAULT_JSON_MAX_TOKENS.
-            config: Optional provider configuration for scoped compatibility rules.
-
-        Returns:
-            Safe token count, clamped correctly and always >= 1.
-        """
-        config = self._settings.config
-        if config is None:
-            raise ConfigError()
-
-        if not requested:
-            return self._settings.max_tokens
-
-        safe_requested = max(1, requested)
-
-        model_name = get_model_name(config)
-
-        try:
-            info = litellm.get_model_info(model=model_name)
-            model_limit = info.get("max_output_tokens") or info.get("max_tokens")
-            if model_limit and isinstance(model_limit, int) and model_limit > 0:
-                safe = min(safe_requested, model_limit)
-                if safe < safe_requested:
-                    logger.debug(
-                        "max_tokens clamped %d → %d for model %s (model limit)",
-                        safe_requested,
-                        safe,
-                        model_name,
-                    )
-                return safe
-        except Exception:
-            pass  # Model not in registry, drop down to fallback logic
-
-        safe = min(safe_requested, self._settings.max_tokens)
-        logger.debug(
-            "Model %s not in LiteLLM registry, using fallback max_tokens %d",
-            model_name,
-            safe,
-        )
-        return safe
-
     async def check_llm_health(
-        self,
-        *,
-        include_details: bool = False,
-        test_prompt: str | None = None,
-    ) -> dict[str, Any]:
-        """Check if the LLM provider is accessible and working."""
-        # if config is None:
-        #     config = get_llm_config()
-
-        # Check if API key is configured. Ollama and openai_compatible local
-        # servers often run without auth, so a blank key is acceptable for those
-        # providers — a sentinel is passed downstream (see _effective_api_key)
-        # to satisfy the OpenAI client's non-empty-string validation.
-        config = self._settings.config
-        if config is None:
-            return {
-                "healthy": False,
-                "error_code": "config_missing",
-            }
-        if (
-            config.provider not in ("ollama", "openai_compatible")
-            and not config.api_key
-        ):
-            return {
-                "healthy": False,
-                "provider": config.provider,
-                "model": config.model,
-                "error_code": "api_key_missing",
-            }
-
-        prompt = test_prompt or "Hi"
-
+        self, *, include_details: bool = False, test_prompt: str | None = None
+    ) -> LLMHealth:
+        config = self._config
+        result = LLMHealth(
+            healthy=False,
+            provider=config.provider if config else None,
+            model=config.model if config else None,
+        )
+        if not self.configured:
+            result.error_code = "configuration_required"
+            return result
+        prompt = test_prompt or 'Return {"ok": true}.'
+        if include_details:
+            result.test_prompt = prompt
         try:
-            # Make a minimal test call with timeout
-            # Pass API key directly to avoid race conditions with global os.environ
-            content = await self.complete(
+            response = await self._complete(
                 prompt,
-                max_tokens=64,
+                "This is a connection test. Return JSON with ok=true.",
+                schema=_HealthProbe,
+                token_limit=256,
             )
-            if not content:
-                # LLM-003: Empty response (even after reasoning_content / thinking
-                # fallbacks in _extract_choice_text) marks health as unhealthy.
-                logger.warning(
-                    "LLM health check returned empty content",
-                    extra={"provider": config.provider, "model": config.model},
-                )
-                result: dict[str, Any] = {
-                    "healthy": False,
-                    "provider": config.provider,
-                    "model": config.model,
-                    "error_code": "empty_content",
-                    "message": "LLM returned empty response",
-                }
-                if include_details:
-                    result["test_prompt"] = prompt
-                    result["model_output"] = None
-                return result
-
-            result = {
-                "healthy": True,
-                "provider": config.provider,
-                "model": config.model,
-            }
+            result.healthy = response.ok
+            if not response.ok:
+                result.error_code = "invalid_probe_response"
             if include_details:
-                result["test_prompt"] = prompt
-                result["model_output"] = content
-                # Surface reasoning/thinking text separately ONLY when the model
-                # also returned distinct primary content. If message.content was
-                # empty, _extract_choice_text already folded the reasoning text
-                # into `content` above — surfacing it here too would duplicate
-                # identical text in "Model output" and "Model thinking".
-                # msg = response.choices[0].message
-                # primary_content = _join_text_parts(
-                #     _extract_text_parts(_safe_get(msg, "content"))
-                # )
-                # reasoning_text = None
-                # if primary_content:
-                #     reasoning_text = (
-                #         _join_text_parts(_extract_text_parts(_safe_get(msg, "reasoning_content")))
-                #         or _join_text_parts(_extract_text_parts(_safe_get(msg, "thinking")))
-                #     )
-                # result["reasoning_content"] = (
-                #     _to_code_block(reasoning_text) if reasoning_text else None
-                # )
-            return result
-        except Exception as e:
-            # Log full exception details server-side, but do not expose them to clients
-            logger.exception(
-                "LLM health check failed",
-                extra={"provider": config.provider, "model": config.model},
-            )
-
-            # Provide a minimal, actionable client-facing hint without leaking secrets.
-            error_code = "health_check_failed"
-            message = str(e)
-            if "404" in message and "/v1/v1/" in message:
-                error_code = "duplicate_v1_path"
-            elif "404" in message:
-                error_code = "not_found_404"
-            elif "<!doctype html" in message.lower() or "<html" in message.lower():
-                error_code = "html_response"
-            result = {
-                "healthy": False,
-                "provider": config.provider,
-                "model": config.model,
-                "error_code": error_code,
-            }
-            if include_details:
-                result["test_prompt"] = prompt
-                result["model_output"] = None
-                # Scrub api-key-like tokens before surfacing the upstream error
-                # text so the Settings UI can't be used to read back even a
-                # partially-masked copy of the configured key.
-                # result["error_detail"] = _to_code_block(_scrub_secrets(message))
-            return result
-
-    async def log_llm_health_check(self) -> None:
-        """Run a best-effort health check and log outcome without affecting API responses."""
-        config = self._settings.config
-        try:
-            health = await self.check_llm_health()
-            if not health.get("healthy", False):
-                logger.warning(
-                    "LLM config saved but health check failed",
-                    extra={"provider": config.provider, "model": config.model},
-                )
-        except Exception:
-            logger.exception(
-                "LLM config saved but health check raised exception",
-                extra={"provider": config.provider, "model": config.model},
-            )
+                result.model_output = response.model_dump_json()
+        except (LLMError, ConfigError) as error:
+            result.error_code = error.code
+        return result
