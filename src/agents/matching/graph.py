@@ -3,7 +3,6 @@ from langgraph.graph.state import CompiledStateGraph, StateGraph
 
 from src.agents.matching.nodes import (
     compare_candidates,
-    rerank_candidates,
     save_matches,
     search_candidates,
 )
@@ -15,13 +14,11 @@ def create_matching_graph() -> CompiledStateGraph:
 
     graph.add_node("search_candidates", search_candidates)
     graph.add_node("compare_candidates", compare_candidates)
-    graph.add_node("rerank_candidates", rerank_candidates)
     graph.add_node("save_matches", save_matches)
 
     graph.add_edge(START, "search_candidates")
     graph.add_edge("search_candidates", "compare_candidates")
-    graph.add_edge("compare_candidates", "rerank_candidates")
-    graph.add_edge("rerank_candidates", "save_matches")
+    graph.add_edge("compare_candidates", "save_matches")
     graph.add_edge("save_matches", END)
 
     return graph.compile()

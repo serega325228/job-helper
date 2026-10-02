@@ -2,10 +2,11 @@ from uuid import UUID
 
 from langgraph.runtime import Runtime
 
-from src.agents.matching.helpers import load_candidate_entities
-from src.agents.matching.schemas import MatchingCandidate
 from src.agents.matching.state import MatchingContext, MatchingState
 from src.exceptions.profile import ProfileNotFoundError
+from src.infrastructure.models.preference_intent import PreferenceIntent
+from src.infrastructure.models.vacancy import Vacancy
+from src.schemas.vacancy_match import MatchingCandidate
 
 
 async def search_candidates(
@@ -33,7 +34,6 @@ async def search_candidates(
     }
 
 
-# Move logic to matching service
 async def compare_candidates(
     state: MatchingState,
     runtime: Runtime[MatchingContext],
@@ -47,84 +47,14 @@ async def compare_candidates(
 
     vacancies, preferences = await load_candidate_entities(state, runtime.context)
 
-    laya_matching = runtime.context.scoring_service.laya_match_vacancies(
-        profile,
-        preferences,
-        vacancies,
-    )
-
-    ranked: list[tuple[UUID, MatchingCandidate]] = []
-    for vacancy_id, candidate in state.candidates.items():
-        vacancy = vacancies[vacancy_id]
-        preference = preferences[candidate.preference_id]
-        profile_comparison = runtime.context.scoring_service.compare_profile(
-            profile,
-            vacancy,
-        )
-        preference_comparison = runtime.context.scoring_service.compare_preference(
-            preference,
-            vacancy,
-        )
-        if not preference_comparison.hard_constraints_passed:
-            continue
-
-        structured_score = runtime.context.matching_service.geometric_score(
-            profile_comparison.score,
-            preference_comparison.score,
-            first_weight=0.45,
-        )
-        ranked.append(
-            (
-                vacancy_id,
-                candidate.model_copy(
-                    update={
-                        "profile_comparison": profile_comparison,
-                        "preference_comparison": preference_comparison,
-                        "structured_score": structured_score,
-                    },
-                ),
-            ),
-        )
-
-    ranked.sort(
-        key=lambda item: item[1].structured_score or 0.0,
-        reverse=True,
-    )
-    return {"candidates": dict(ranked[: state.rerank_limit])}
-
-
-async def rerank_candidates(
-    state: MatchingState,
-    runtime: Runtime[MatchingContext],
-) -> dict:
-    if not state.candidates:
-        return {"candidates": {}}
-
-    profile = await runtime.context.profile_service.get_profile(state.profile_id)
-    if profile is None:
-        raise ProfileNotFoundError(state.profile_id)
-
-    vacancies, preferences = await load_candidate_entities(state, runtime.context)
-    rerank_scores = await runtime.context.scoring_service.rerank_vacancies(
-        profile,
-        list(vacancies.values()),
-        {
-            vacancy_id: preferences[candidate.preference_id]
-            for vacancy_id, candidate in state.candidates.items()
-        },
-    )
     return {
-        "candidates": {
-            vacancy_id: candidate.model_copy(
-                update={
-                    "profile_rerank_score": rerank_scores[vacancy_id].profile_score,
-                    "preference_rerank_score": (
-                        rerank_scores[vacancy_id].preference_score
-                    ),
-                },
-            )
-            for vacancy_id, candidate in state.candidates.items()
-        },
+        "candidates": await runtime.context.matching_service.compare_candidates(
+            profile,
+            state.candidates,
+            vacancies,
+            preferences,
+            limit=state.rerank_limit,
+        ),
     }
 
 
@@ -139,6 +69,7 @@ async def save_matches(
             preference_intent_id=candidate.preference_id,
             profile_comparison=candidate.profile_comparison,
             preference_comparison=candidate.preference_comparison,
+            laya_comparison=candidate.laya_comparison,
             profile_rerank_score=candidate.profile_rerank_score,
             preference_rerank_score=candidate.preference_rerank_score,
             title_similarity=candidate.title_similarity,
@@ -150,3 +81,36 @@ async def save_matches(
     results.sort(key=lambda result: result.total_score, reverse=True)
     saved_matches = await runtime.context.matching_service.save_results(results)
     return {"vacancy_match_ids": [vacancy_match.id for vacancy_match in saved_matches]}
+
+
+async def load_candidate_entities(
+    state: MatchingState,
+    context: MatchingContext,
+) -> tuple[dict[UUID, Vacancy], dict[UUID, PreferenceIntent]]:
+    vacancies = {
+        vacancy.id: vacancy
+        for vacancy in await context.vacancy_service.get_vacancies_by_ids(
+            list(state.candidates),
+        )
+    }
+    preference_ids = list(
+        {candidate.preference_id for candidate in state.candidates.values()},
+    )
+    preferences = {
+        preference.id: preference
+        for preference in await context.profile_service.get_preferences_by_ids(
+            state.profile_id,
+            preference_ids,
+        )
+    }
+
+    missing_vacancies = state.candidates.keys() - vacancies.keys()
+    missing_preferences = set(preference_ids) - preferences.keys()
+    if missing_vacancies or missing_preferences:
+        raise RuntimeError(
+            "Candidate entities are missing: "
+            f"vacancies={sorted(map(str, missing_vacancies))}, "
+            f"preferences={sorted(map(str, missing_preferences))}",
+        )
+
+    return vacancies, preferences

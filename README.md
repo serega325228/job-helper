@@ -96,6 +96,20 @@ invented work history, qualifications, or metrics. Normal mode requires resume
 evidence. Evidence checks use skill aliases and term matching, not a semantic proof
 of proficiency; metric warnings and edit review still matter.
 
+## Vacancy matching
+
+The matching graph searches by preferences, compares and reranks candidates, then
+saves matches. Comparison and reranking share one load of the profile, vacancies,
+and preferences. Hard constraints are checked before profile scoring or model
+inference; only the top `rerank_limit` candidates reach the reranker.
+
+Laya evaluates role and skill fit for each vacancy's selected preference. Its
+`none`, `weak`, `good`, and `strong` labels map to `0`, `1/3`, `2/3`, and `1`.
+Each fit contributes 10% to both the shortlist and final geometric scores. A zero
+component makes the combined score zero. These ordinal values are uncalibrated;
+calibration requires labeled matches. Labels and numeric scores are saved in
+`component_scores.laya` with matcher version `structured-laya-rerank-v1`.
+
 ## Checks
 
 Run the standard-library suite without contacting LLM providers:

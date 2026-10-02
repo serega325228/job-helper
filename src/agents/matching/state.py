@@ -3,10 +3,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from src.agents.matching.schemas import MatchingCandidate
 from src.schemas.vacancy import VacancyHardFilters
+from src.schemas.vacancy_match import MatchingCandidate
 from src.services.profile import ProfileService
-from src.services.scoring import ScoringService
 from src.services.vacancy import VacancyService
 from src.services.vacancy_match import VacancyMatchService
 
@@ -28,5 +27,4 @@ class MatchingState(BaseModel):
 class MatchingContext:
     profile_service: ProfileService
     vacancy_service: VacancyService
-    scoring_service: ScoringService
     matching_service: VacancyMatchService

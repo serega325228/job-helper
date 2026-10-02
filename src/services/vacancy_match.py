@@ -3,26 +3,125 @@ from typing import ClassVar
 from uuid import UUID
 
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
+from src.infrastructure.models.preference_intent import PreferenceIntent
+from src.infrastructure.models.profile import Profile
+from src.infrastructure.models.vacancy import Vacancy
 from src.infrastructure.models.vacancy_match import VacancyMatch
-from src.schemas.scoring import PreferenceComparison, ProfileComparison
+from src.schemas.scoring import LayaComparison, PreferenceComparison, ProfileComparison
 from src.schemas.vacancy import VacancyHardFilters
 from src.schemas.vacancy_match import (
     MatchCategory,
+    MatchingCandidate,
     VacancyEmbeddingSearchResult,
     VacancyMatchResult,
 )
+from src.services.scoring import ScoringService
 
 
 class VacancyMatchService:
+    # ponytail: ordinal fit scores are uncalibrated; calibrate against labeled matches.
+    LAYA_FIT_SCORES: ClassVar[dict[str, float]] = {
+        "none": 0.0,
+        "weak": 1 / 3,
+        "good": 2 / 3,
+        "strong": 1.0,
+    }
+    COMPARISON_SCORE_WEIGHTS: ClassVar[dict[str, float]] = {
+        "structured_profile": 0.36,
+        "structured_preference": 0.44,
+        "laya_role": 0.10,
+        "laya_skill": 0.10,
+    }
     FINAL_SCORE_WEIGHTS: ClassVar[dict[str, float]] = {
-        "structured_profile": 0.20,
-        "structured_preference": 0.20,
-        "profile_rerank": 0.30,
-        "preference_rerank": 0.30,
+        "structured_profile": 0.16,
+        "structured_preference": 0.16,
+        "profile_rerank": 0.24,
+        "preference_rerank": 0.24,
+        "laya_role": 0.10,
+        "laya_skill": 0.10,
     }
 
-    def __init__(self, unit_of_work: SqlAlchemyUnitOfWork) -> None:
+    def __init__(
+        self,
+        unit_of_work: SqlAlchemyUnitOfWork,
+        scoring_service: ScoringService,
+    ) -> None:
         self._uow = unit_of_work
+        self._scoring = scoring_service
+
+    async def compare_candidates(
+        self,
+        profile: Profile,
+        candidates: dict[UUID, MatchingCandidate],
+        vacancies: dict[UUID, Vacancy],
+        preferences: dict[UUID, PreferenceIntent],
+        *,
+        limit: int,
+    ) -> dict[UUID, MatchingCandidate]:
+        if limit < 1:
+            raise ValueError("limit must be greater than zero")
+
+        compared: dict[UUID, MatchingCandidate] = {}
+        for vacancy_id, candidate in candidates.items():
+            vacancy = vacancies[vacancy_id]
+            preference_comparison = self._scoring.compare_preference(
+                preferences[candidate.preference_id],
+                vacancy,
+            )
+            if not preference_comparison.hard_constraints_passed:
+                continue
+
+            profile_comparison = self._scoring.compare_profile(profile, vacancy)
+            compared[vacancy_id] = candidate.model_copy(
+                update={
+                    "profile_comparison": profile_comparison,
+                    "preference_comparison": preference_comparison,
+                },
+            )
+
+        if not compared:
+            return {}
+
+        preferences_by_vacancy = {
+            vacancy_id: preferences[candidate.preference_id]
+            for vacancy_id, candidate in compared.items()
+        }
+        laya_matches = await self._scoring.laya_match_vacancies(
+            profile,
+            preferences_by_vacancy,
+            {vacancy_id: vacancies[vacancy_id] for vacancy_id in compared},
+        )
+        for vacancy_id, candidate in compared.items():
+            laya_comparison = laya_matches[vacancy_id]
+            candidate.laya_comparison = laya_comparison
+            candidate.structured_score = self.weighted_geometric_score(
+                {
+                    "structured_profile": candidate.profile_comparison.score,
+                    "structured_preference": candidate.preference_comparison.score,
+                    "laya_role": self.LAYA_FIT_SCORES[laya_comparison.role_fit],
+                    "laya_skill": self.LAYA_FIT_SCORES[laya_comparison.skill_fit],
+                },
+                self.COMPARISON_SCORE_WEIGHTS,
+            )
+
+        ranked = dict(
+            sorted(
+                compared.items(),
+                key=lambda item: item[1].structured_score,
+                reverse=True,
+            )[:limit],
+        )
+        rerank_scores = await self._scoring.rerank_vacancies(
+            profile,
+            [vacancies[vacancy_id] for vacancy_id in ranked],
+            {vacancy_id: preferences_by_vacancy[vacancy_id] for vacancy_id in ranked},
+        )
+        for vacancy_id, candidate in ranked.items():
+            candidate.profile_rerank_score = rerank_scores[vacancy_id].profile_score
+            candidate.preference_rerank_score = (
+                rerank_scores[vacancy_id].preference_score
+            )
+        return ranked
 
     async def save_result(self, result: VacancyMatchResult) -> VacancyMatch:
         return (await self.save_results([result]))[0]
@@ -78,6 +177,7 @@ class VacancyMatchService:
         preference_intent_id: UUID,
         profile_comparison: ProfileComparison | None,
         preference_comparison: PreferenceComparison | None,
+        laya_comparison: LayaComparison | None,
         profile_rerank_score: float | None,
         preference_rerank_score: float | None,
         title_similarity: float,
@@ -88,12 +188,16 @@ class VacancyMatchService:
             raise ValueError(f"Structured scores are missing for vacancy {vacancy_id}")
         if profile_rerank_score is None or preference_rerank_score is None:
             raise ValueError(f"Rerank scores are missing for vacancy {vacancy_id}")
+        if laya_comparison is None:
+            raise ValueError(f"Laya scores are missing for vacancy {vacancy_id}")
 
         scores = {
             "structured_profile": profile_comparison.score,
             "structured_preference": preference_comparison.score,
             "profile_rerank": profile_rerank_score,
             "preference_rerank": preference_rerank_score,
+            "laya_role": self.LAYA_FIT_SCORES[laya_comparison.role_fit],
+            "laya_skill": self.LAYA_FIT_SCORES[laya_comparison.skill_fit],
         }
         total_score = (
             self.weighted_geometric_score(scores, self.FINAL_SCORE_WEIGHTS)
@@ -114,6 +218,11 @@ class VacancyMatchService:
             component_scores={
                 "profile": profile_comparison.components,
                 "preference": preference_comparison.components,
+                "laya": {
+                    **laya_comparison.model_dump(),
+                    "role_score": scores["laya_role"],
+                    "skill_score": scores["laya_skill"],
+                },
                 "semantic": {
                     "title": title_similarity,
                     "content": content_similarity,
@@ -122,18 +231,6 @@ class VacancyMatchService:
             },
             matched_skills=profile_comparison.matched_skills,
             missing_skills=profile_comparison.missing_skills,
-        )
-
-    @staticmethod
-    def geometric_score(
-        first: float,
-        second: float,
-        *,
-        first_weight: float,
-    ) -> float:
-        return VacancyMatchService.weighted_geometric_score(
-            {"first": first, "second": second},
-            {"first": first_weight, "second": 1 - first_weight},
         )
 
     @staticmethod

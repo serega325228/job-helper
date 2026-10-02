@@ -4,6 +4,22 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from src.schemas.scoring import LayaComparison, PreferenceComparison, ProfileComparison
+
+
+class MatchingCandidate(BaseModel):
+    preference_id: UUID
+    title_similarity: float
+    content_similarity: float
+    embedding_similarity: float
+
+    laya_comparison: LayaComparison | None = None
+    profile_comparison: ProfileComparison | None = None
+    preference_comparison: PreferenceComparison | None = None
+    structured_score: float | None = Field(default=None, ge=0, le=1)
+    profile_rerank_score: float | None = Field(default=None, ge=0, le=1)
+    preference_rerank_score: float | None = Field(default=None, ge=0, le=1)
+
 
 class MatchCategory(StrEnum):
     TARGET = "target"
@@ -35,5 +51,5 @@ class VacancyMatchResult(BaseModel):
     matched_skills: list[str] = Field(default_factory=list)
     missing_skills: list[str] = Field(default_factory=list)
     explanation: str | None = None
-    matcher_version: str = "structured-rerank-v1"
+    matcher_version: str = "structured-laya-rerank-v1"
     reranker_model: str | None = None

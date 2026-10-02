@@ -293,35 +293,50 @@ class ScoringService:
         best_preference = max(valid.keys(), key=selection_score)
         return (best_preference, valid[best_preference])
 
-    def laya_match_vacancies(
+    async def laya_match_vacancies(
         self,
         profile: Profile,
-        preferences: list[PreferenceIntent],
-        vacancies: list[Vacancy],
-    ) -> list[LayaComparison]:
+        preferences_by_vacancy: dict[UUID, PreferenceIntent],
+        vacancies: dict[UUID, Vacancy],
+    ) -> dict[UUID, LayaComparison]:
+        if not vacancies:
+            return {}
+
+        missing_preferences = vacancies.keys() - preferences_by_vacancy.keys()
+        if missing_preferences:
+            raise ValueError(
+                "Preferences are missing for vacancies: "
+                f"{sorted(map(str, missing_preferences))}",
+            )
+
         states: list[dict] = [
-            self.make_laya_match_state(vacancy, preference, profile)
-            for vacancy, preference in zip(vacancies, preferences)
+            self.make_laya_match_state(
+                vacancy,
+                preferences_by_vacancy[vacancy_id],
+                profile,
+            )
+            for vacancy_id, vacancy in vacancies.items()
         ]
 
-        results_raw = self._laya.evaluate_batch(states, MATCH_QUESTIONS)
-
-        results = [
-            LayaComparison(
+        results_raw = await asyncio.to_thread(
+            self._laya.evaluate_batch,
+            states,
+            MATCH_QUESTIONS,
+        )
+        return {
+            vacancy_id: LayaComparison(
                 role_fit=result["answers"]["role_fit"]["choice"],
                 skill_fit=result["answers"]["skill_fit"]["choice"],
             )
-            for result in results_raw
-        ]
-
-        return results
+            for vacancy_id, result in zip(vacancies, results_raw, strict=True)
+        }
 
     @staticmethod
     def make_laya_match_state(
         vacancy: Vacancy, preference: PreferenceIntent, profile: Profile
     ) -> dict:
         candidate_state = {
-            "target_role": preference.name,
+            "target_role": build_preference_title_text(preference),
             "skills": profile.skills,
             "experience": profile.experience,
         }

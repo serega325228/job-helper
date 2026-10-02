@@ -171,11 +171,13 @@ class ServiceProvider(Provider):
         reranker: VacancyReranker,
         embedding_service: EmbeddingService,
         skill_canonicalizer: SkillCanonicalizer,
+        laya: LayaProvider,
     ) -> ScoringService:
         return ScoringService(
             reranker,
             embedding_service,
             skill_canonicalizer,
+            laya,
         )
 
     @provide(scope=Scope.APP)
