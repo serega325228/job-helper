@@ -8,6 +8,7 @@ from src.infrastructure.models.preference_intent import PreferenceIntent
 from src.infrastructure.models.profile import Profile
 from src.infrastructure.models.vacancy import Vacancy
 from src.schemas.scoring import (
+    LayaComparison,
     PreferenceComparison,
     ProfileComparison,
     VacancyRerankScores,
@@ -17,26 +18,20 @@ from src.schemas.vacancy_match import VacancyEmbeddingSearchResult
 from src.services.vacancy_match import VacancyMatchService
 
 
-class FakeMatchingService:
-    def __init__(self, result: VacancyEmbeddingSearchResult | None) -> None:
+class FakeMatchingService(VacancyMatchService):
+    def __init__(
+        self,
+        result: VacancyEmbeddingSearchResult | None,
+        scoring_service,
+    ) -> None:
+        super().__init__(None, scoring_service)
         self.result = result
         self.calls = []
         self.saved_results = []
-        self._result_builder = VacancyMatchService(None)
 
     async def search_by_preferences(self, profile_id, hard_filters, **kwargs):
         self.calls.append((profile_id, hard_filters, kwargs))
         return [self.result] if self.result is not None else []
-
-    def geometric_score(self, first, second, *, first_weight):
-        return self._result_builder.geometric_score(
-            first,
-            second,
-            first_weight=first_weight,
-        )
-
-    def build_result(self, **kwargs):
-        return self._result_builder.build_result(**kwargs)
 
     async def save_results(self, results):
         self.saved_results = results
@@ -47,11 +42,15 @@ class FakeProfileService:
     def __init__(self, profile: Profile, preference: PreferenceIntent) -> None:
         self.profile = profile
         self.preference = preference
+        self.profile_calls = 0
+        self.preference_calls = 0
 
     async def get_profile(self, profile_id):
+        self.profile_calls += 1
         return self.profile if profile_id == self.profile.id else None
 
     async def get_preferences_by_ids(self, profile_id, preference_ids):
+        self.preference_calls += 1
         if profile_id == self.profile.id and self.preference.id in preference_ids:
             return [self.preference]
         return []
@@ -60,20 +59,30 @@ class FakeProfileService:
 class FakeVacancyService:
     def __init__(self, vacancy: Vacancy) -> None:
         self.vacancy = vacancy
+        self.calls = 0
 
     async def get_vacancies_by_ids(self, vacancy_ids):
+        self.calls += 1
         return [self.vacancy] if self.vacancy.id in vacancy_ids else []
 
 
 class FakeScoringService:
     def __init__(self) -> None:
         self.rerank_calls = 0
+        self.laya_calls = 0
 
     def compare_profile(self, profile, vacancy):
         return ProfileComparison(score=0.7)
 
     def compare_preference(self, preference, vacancy):
         return PreferenceComparison(score=0.8, hard_constraints_passed=True)
+
+    async def laya_match_vacancies(self, profile, preferences_by_vacancy, vacancies):
+        self.laya_calls += 1
+        return {
+            vacancy_id: LayaComparison(role_fit="good", skill_fit="strong")
+            for vacancy_id in vacancies
+        }
 
     async def rerank_vacancies(self, profile, vacancies, preferences_by_vacancy):
         self.rerank_calls += 1
@@ -122,12 +131,11 @@ class MatchingGraphTests(unittest.IsolatedAsyncioTestCase):
             content_similarity=0.8,
             combined_similarity=0.84,
         )
-        matching_service = FakeMatchingService(embedding_result)
         scoring_service = FakeScoringService()
+        matching_service = FakeMatchingService(embedding_result, scoring_service)
         context = MatchingContext(
             profile_service=FakeProfileService(profile, preference),
             vacancy_service=FakeVacancyService(vacancy),
-            scoring_service=scoring_service,
             matching_service=matching_service,
         )
         filters = VacancyHardFilters(cities=["Москва"])
@@ -145,6 +153,7 @@ class MatchingGraphTests(unittest.IsolatedAsyncioTestCase):
         candidate = result["candidates"][vacancy_id]
         self.assertEqual(candidate.preference_id, preference_id)
         self.assertIsNotNone(candidate.structured_score)
+        self.assertEqual(candidate.laya_comparison.role_fit, "good")
         self.assertEqual(candidate.profile_rerank_score, 0.9)
         self.assertEqual(candidate.preference_rerank_score, 0.85)
         self.assertEqual(len(result["vacancy_match_ids"]), 1)
@@ -158,6 +167,12 @@ class MatchingGraphTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved_result.profile_rerank_score, 0.9)
         self.assertEqual(saved_result.preference_rerank_score, 0.85)
         self.assertEqual(scoring_service.rerank_calls, 1)
+        self.assertEqual(scoring_service.laya_calls, 1)
+        self.assertEqual(context.profile_service.profile_calls, 1)
+        self.assertEqual(context.profile_service.preference_calls, 1)
+        self.assertEqual(context.vacancy_service.calls, 1)
+        self.assertEqual(saved_result.component_scores["laya"]["role_fit"], "good")
+        self.assertEqual(saved_result.matcher_version, "structured-laya-rerank-v1")
         self.assertEqual(matching_service.calls[0][1], filters)
         self.assertEqual(matching_service.calls[0][2]["candidate_limit"], 100)
         self.assertEqual(
@@ -191,12 +206,11 @@ class MatchingGraphTests(unittest.IsolatedAsyncioTestCase):
             soft_conditions={},
             raw_payload={},
         )
-        matching_service = FakeMatchingService(None)
         scoring_service = FakeScoringService()
+        matching_service = FakeMatchingService(None, scoring_service)
         context = MatchingContext(
             profile_service=FakeProfileService(profile, preference),
             vacancy_service=FakeVacancyService(vacancy),
-            scoring_service=scoring_service,
             matching_service=matching_service,
         )
 
@@ -208,6 +222,9 @@ class MatchingGraphTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["candidates"], {})
         self.assertEqual(result["vacancy_match_ids"], [])
         self.assertEqual(scoring_service.rerank_calls, 0)
+        self.assertEqual(scoring_service.laya_calls, 0)
+        self.assertEqual(context.profile_service.profile_calls, 0)
+        self.assertEqual(context.vacancy_service.calls, 0)
         self.assertEqual(matching_service.saved_results, [])
 
 

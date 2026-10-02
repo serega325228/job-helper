@@ -1,12 +1,16 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
+from src.infrastructure.laya.laya_provider import LayaProvider
 from src.infrastructure.models.preference_intent import PreferenceIntent
 from src.infrastructure.models.profile import Profile
 from src.infrastructure.models.vacancy import Vacancy
 from src.schemas.vacancy import VacancySoftConditions
-from src.services.embedding_text import build_vacancy_search_text
+from src.services.embedding_text import (
+    build_preference_title_text,
+    build_vacancy_search_text,
+)
 from src.services.scoring import ScoringService
 from src.services.skill_canonicalization import SkillCanonicalizer
 
@@ -104,11 +108,77 @@ def make_preference(profile_id) -> PreferenceIntent:
 
 class ScoringServiceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        self.laya = Mock(spec=LayaProvider)
         self.service = ScoringService(
             FakeReranker(),
             FakeEmbeddingService(),
             SkillCanonicalizer(),
+            self.laya,
         )
+
+    async def test_laya_pairs_each_vacancy_with_its_preference(self) -> None:
+        profile = make_profile()
+        first_preference = make_preference(profile.id)
+        second_preference = make_preference(profile.id)
+        second_preference.name = "Platform"
+        second_preference.target_titles = ["Platform Engineer"]
+        vacancies = [make_vacancy() for _ in range(3)]
+        preferences_by_vacancy = {
+            vacancies[2].id: first_preference,
+            vacancies[0].id: first_preference,
+            vacancies[1].id: second_preference,
+        }
+        self.laya.evaluate_batch.return_value = [
+            {
+                "answers": {
+                    "role_fit": {"choice": role_fit},
+                    "skill_fit": {"choice": "strong"},
+                },
+            }
+            for role_fit in ("good", "weak", "strong")
+        ]
+
+        result = await self.service.laya_match_vacancies(
+            profile,
+            preferences_by_vacancy,
+            {vacancy.id: vacancy for vacancy in vacancies},
+        )
+
+        self.assertEqual(list(result), [vacancy.id for vacancy in vacancies])
+        self.assertEqual(result[vacancies[0].id].role_fit, "good")
+        self.assertEqual(result[vacancies[1].id].role_fit, "weak")
+        self.assertEqual(result[vacancies[2].id].role_fit, "strong")
+        states = self.laya.evaluate_batch.call_args.args[0]
+        self.assertEqual(
+            [state["candidate"]["target_role"] for state in states],
+            [
+                build_preference_title_text(first_preference),
+                build_preference_title_text(second_preference),
+                build_preference_title_text(first_preference),
+            ],
+        )
+
+    async def test_laya_skips_empty_input_and_rejects_missing_preferences(self) -> None:
+        profile = make_profile()
+        self.assertEqual(await self.service.laya_match_vacancies(profile, {}, {}), {})
+        vacancy = make_vacancy()
+
+        with self.assertRaisesRegex(ValueError, "Preferences are missing"):
+            await self.service.laya_match_vacancies(profile, {}, {vacancy.id: vacancy})
+
+        self.laya.evaluate_batch.assert_not_called()
+
+    async def test_laya_rejects_incomplete_batch_results(self) -> None:
+        profile = make_profile()
+        vacancy = make_vacancy()
+        self.laya.evaluate_batch.return_value = []
+
+        with self.assertRaises(ValueError):
+            await self.service.laya_match_vacancies(
+                profile,
+                {vacancy.id: make_preference(profile.id)},
+                {vacancy.id: vacancy},
+            )
 
     def test_vacancy_embedding_text_contains_only_semantic_fields(self) -> None:
         vacancy = make_vacancy()
