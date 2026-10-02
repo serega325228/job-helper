@@ -33,6 +33,7 @@ async def search_candidates(
     }
 
 
+# Move logic to matching service
 async def compare_candidates(
     state: MatchingState,
     runtime: Runtime[MatchingContext],
@@ -45,6 +46,13 @@ async def compare_candidates(
         raise ProfileNotFoundError(state.profile_id)
 
     vacancies, preferences = await load_candidate_entities(state, runtime.context)
+
+    laya_matching = runtime.context.scoring_service.laya_match_vacancies(
+        profile,
+        preferences,
+        vacancies,
+    )
+
     ranked: list[tuple[UUID, MatchingCandidate]] = []
     for vacancy_id, candidate in state.candidates.items():
         vacancy = vacancies[vacancy_id]

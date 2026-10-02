@@ -5,11 +5,14 @@ from collections import defaultdict
 from typing import ClassVar
 from uuid import UUID
 
+from src.infrastructure.laya.laya_provider import LayaProvider
+from src.infrastructure.laya.questions import MATCH_QUESTIONS
 from src.infrastructure.models.preference_intent import PreferenceIntent
 from src.infrastructure.models.profile import Profile
 from src.infrastructure.models.vacancy import Vacancy
 from src.infrastructure.reranker.vacancy_reranker import VacancyReranker
 from src.schemas.scoring import (
+    LayaComparison,
     PreferenceComparison,
     ProfileComparison,
     VacancyRerankScores,
@@ -21,6 +24,7 @@ from src.services.embedding_text import (
     build_preference_title_text,
     build_profile_search_text,
     build_vacancy_search_text,
+    soft_conditions,
 )
 from src.services.skill_canonicalization import SkillCanonicalizer
 
@@ -69,10 +73,12 @@ class ScoringService:
         reranker: VacancyReranker,
         embedding_service: EmbeddingService,
         skill_canonicalizer: SkillCanonicalizer,
+        laya: LayaProvider,
     ) -> None:
         self._reranker = reranker
         self._embedding = embedding_service
         self._skills = skill_canonicalizer
+        self._laya = laya
 
     async def update_preference_embeddings(
         self,
@@ -286,6 +292,53 @@ class ScoringService:
 
         best_preference = max(valid.keys(), key=selection_score)
         return (best_preference, valid[best_preference])
+
+    def laya_match_vacancies(
+        self,
+        profile: Profile,
+        preferences: list[PreferenceIntent],
+        vacancies: list[Vacancy],
+    ) -> list[LayaComparison]:
+        states: list[dict] = [
+            self.make_laya_match_state(vacancy, preference, profile)
+            for vacancy, preference in zip(vacancies, preferences)
+        ]
+
+        results_raw = self._laya.evaluate_batch(states, MATCH_QUESTIONS)
+
+        results = [
+            LayaComparison(
+                role_fit=result["answers"]["role_fit"]["choice"],
+                skill_fit=result["answers"]["skill_fit"]["choice"],
+            )
+            for result in results_raw
+        ]
+
+        return results
+
+    @staticmethod
+    def make_laya_match_state(
+        vacancy: Vacancy, preference: PreferenceIntent, profile: Profile
+    ) -> dict:
+        candidate_state = {
+            "target_role": preference.name,
+            "skills": profile.skills,
+            "experience": profile.experience,
+        }
+
+        cond = soft_conditions(vacancy)
+
+        vacancy_state = {
+            "title": vacancy.title,
+            "requirements": cond.requirements,
+            "required_skills": cond.required_skills,
+            "preferred_skills": cond.preferred_skills,
+        }
+
+        return {
+            "candidate": candidate_state,
+            "vacancy": vacancy_state,
+        }
 
     async def rerank_vacancies(
         self,

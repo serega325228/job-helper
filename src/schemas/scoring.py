@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -9,6 +11,11 @@ class ProfileComparison(BaseModel):
     missing_skills: list[str] = Field(default_factory=list)
     components: dict[str, float] = Field(default_factory=dict)
 
+class LayaComparison(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    role_fit: Literal["none", "weak", "good", "strong"]
+    skill_fit: Literal["none", "weak", "good", "strong"]
 
 class PreferenceComparison(BaseModel):
     model_config = ConfigDict(frozen=True)

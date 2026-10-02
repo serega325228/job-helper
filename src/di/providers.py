@@ -9,6 +9,7 @@ from src.config.settings import Settings, get_settings
 from src.exceptions.config import ConfigError
 from src.infrastructure.db.engine import Database
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
+from src.infrastructure.laya.laya_provider import LayaProvider
 from src.infrastructure.llm.llm import LLMConfigManager, LLMProvider
 from src.infrastructure.llm.profile_analyzer import ProfileAnalyzer
 from src.infrastructure.llm.vacancy_analyzer import VacancyAnalyzer
@@ -136,6 +137,10 @@ class InfrastructureProvider(Provider):
     @provide(scope=Scope.APP)
     def pdf_render(self, playwright: Playwright, settings: Settings) -> PDFRender:
         return PDFRender(playwright, settings.pdf)
+
+    @provide(scope=Scope.APP)
+    def laya_provider(self) -> LayaProvider:
+        return LayaProvider()
 
 
 class RepositoryProvider(Provider):

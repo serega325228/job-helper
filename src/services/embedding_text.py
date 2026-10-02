@@ -12,7 +12,7 @@ def _join(values: list[str]) -> str:
     return ", ".join(value.strip() for value in values if value.strip())
 
 
-def _soft_conditions(
+def soft_conditions(
     vacancy: Vacancy | NormalizedVacancy,
 ) -> VacancySoftConditions:
     value = vacancy.soft_conditions
@@ -25,7 +25,7 @@ def build_vacancy_search_text(
     vacancy: Vacancy | NormalizedVacancy,
 ) -> str:
     """Build semantic vacancy content without SQL-filterable conditions."""
-    soft = _soft_conditions(vacancy)
+    soft = soft_conditions(vacancy)
     sections: list[str] = []
 
     if soft.summary:

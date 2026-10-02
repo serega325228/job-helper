@@ -2,7 +2,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from src.schemas.scoring import PreferenceComparison, ProfileComparison
+from src.schemas.scoring import LayaComparison, PreferenceComparison, ProfileComparison
 
 
 class MatchingCandidate(BaseModel):
@@ -10,6 +10,8 @@ class MatchingCandidate(BaseModel):
     title_similarity: float
     content_similarity: float
     embedding_similarity: float
+
+    laya_comparison: LayaComparison | None = None
 
     profile_comparison: ProfileComparison | None = None
     preference_comparison: PreferenceComparison | None = None
