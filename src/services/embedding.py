@@ -1,4 +1,5 @@
 from pathlib import Path
+from threading import Lock
 
 from llama_cpp import (
     LLAMA_POOLING_TYPE_MEAN,
@@ -17,13 +18,19 @@ class EmbeddingService:
             n_batch=2048,
             verbose=False,
         )
+        # ponytail: one shared model serializes inference; use separate model workers to scale.
+        self._lock = Lock()
+        self._closed = False
 
     def embed_query(self, text: str) -> list[float]:
         return self.embed_queries([text])[0]
 
     def embed_queries(self, texts: list[str]) -> list[list[float]]:
         prompts = [f"task: search result | query: {text}" for text in texts]
-        return self._model.embed(prompts, normalize=True)
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Embedding service is closed")
+            return self._model.embed(prompts, normalize=True)
 
     def embed_document(
         self,
@@ -38,10 +45,12 @@ class EmbeddingService:
         documents: list[tuple[str | None, str]],
     ) -> list[list[float]]:
         prompts = [
-            f"title: {title or 'none'} | text: {text}"
-            for title, text in documents
+            f"title: {title or 'none'} | text: {text}" for title, text in documents
         ]
-        return self._model.embed(prompts, normalize=True)
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Embedding service is closed")
+            return self._model.embed(prompts, normalize=True)
 
     def embed_vacancy(
         self,
@@ -57,4 +66,7 @@ class EmbeddingService:
         return self.embed_documents(vacancies)
 
     def close(self) -> None:
-        self._model.close()
+        with self._lock:
+            if not self._closed:
+                self._model.close()
+                self._closed = True

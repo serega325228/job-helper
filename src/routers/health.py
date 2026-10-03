@@ -5,12 +5,14 @@ from uuid import UUID
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter
+from structlog import get_logger
 
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.llm.llm import LLMConfigManager, LLMProvider
 from src.schemas.api import HealthResponse, StatusResponse
 
-logger = logging.getLogger(__name__)
+logger = get_logger()
+
 router = APIRouter(tags=["Health"])
 
 

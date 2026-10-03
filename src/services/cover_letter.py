@@ -2,6 +2,8 @@
 
 import logging
 
+from structlog import get_logger
+
 from src.exceptions.config import ConfigError
 from src.infrastructure.llm.llm import LLMProvider
 from src.prompts.templates import (
@@ -14,7 +16,7 @@ from src.repositories.prompt import PromptRepository
 from src.schemas.llm import FeatureConfig
 from src.schemas.resume import ResumeData
 
-logger = logging.getLogger(__name__)
+logger = get_logger()
 
 
 class CoverLetterService:

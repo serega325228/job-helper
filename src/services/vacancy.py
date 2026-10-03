@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from pydantic import ValidationError
+from structlog import get_logger
 
 from src.config.retry import RetryableLlmError, llm_retry
 from src.exceptions.vacancy import VacancyNormalizationError
@@ -21,7 +22,7 @@ from src.schemas.vacancy import (
 from src.services.embedding import EmbeddingService
 from src.services.embedding_text import build_vacancy_search_text
 
-logger = logging.getLogger(__name__)
+logger = get_logger()
 
 
 class VacancyService:

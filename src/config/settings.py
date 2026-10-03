@@ -1,11 +1,13 @@
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
+from typing import Self
 
 from pydantic import (
     Field,
     PrivateAttr,
     SecretStr,
+    model_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
@@ -88,7 +90,8 @@ class EmbeddingSettings(BaseSettings):
     model_path: Path = (
         Path(__file__).parent.parent.parent
         / ".models"
-        / "embeddinggemma-300M-Q8_0.gguf"
+        #/ "embeddinggemma-300M-Q8_0.gguf"
+        / "Qwen3-Embedding-0.6B-Q8_0.gguf"
     )
 
     @property
@@ -185,6 +188,36 @@ class HhSettings(BaseSettings):
     request_timeout_seconds: float = Field(default=30.0, gt=0)
 
 
+class ScrapingSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="SCRAPING_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    min_concurrency: int = Field(default=1, ge=1)
+    desired_concurrency: int = Field(default=3, ge=1)
+    max_concurrency: int = Field(default=5, ge=1)
+    max_requests_per_minute: int = Field(default=30, ge=1)
+    max_search_pages: int = Field(default=10, ge=1)
+    max_previews: int = Field(default=250, ge=1)
+    max_detail_pages: int = Field(default=50, ge=1)
+    laya_batch_size: int = Field(default=32, ge=1)
+    max_request_retries: int = Field(default=2, ge=0)
+    navigation_timeout_seconds: float = Field(default=30.0, gt=0)
+    request_timeout_seconds: float = Field(default=300.0, gt=0)
+    headless: bool = True
+
+    @model_validator(mode="after")
+    def validate_concurrency(self) -> Self:
+        if not self.min_concurrency <= self.desired_concurrency <= self.max_concurrency:
+            raise ValueError(
+                "Expected min_concurrency <= desired_concurrency <= max_concurrency"
+            )
+        return self
+
+
 class LoggingSettings(BaseSettings):
     level: LogLevel = LogLevel.INFO
     format: LogFormat = LogFormat.CONSOLE
@@ -211,6 +244,7 @@ class Settings(BaseSettings):
     reranker: RerankerSettings = RerankerSettings()
     agents: AgentSettings = AgentSettings()
     hh: HhSettings = HhSettings()
+    scraping: ScrapingSettings = ScrapingSettings()
     logging: LoggingSettings = LoggingSettings()
 
     model_config = SettingsConfigDict(

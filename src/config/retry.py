@@ -1,6 +1,7 @@
 import logging
 
 from pydantic import ValidationError
+from structlog import get_logger
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -8,7 +9,7 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger()
 
 
 class RetryableLlmError(Exception):

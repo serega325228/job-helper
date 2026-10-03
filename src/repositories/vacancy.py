@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.functions import func
 
@@ -27,12 +27,18 @@ class VacancyRepository:
     async def get_by_external_keys(
         self,
         keys: set[tuple[str, str]],
+        *,
+        urls: set[str] | None = None,
     ) -> list[Vacancy]:
-        if not keys:
+        if not keys and not urls:
             return []
 
+        # ponytail: URL fallback scans unindexed URLs; add a URL index as storage grows.
         stmt = select(Vacancy).where(
-            tuple_(Vacancy.source, Vacancy.external_id).in_(keys),
+            or_(
+                tuple_(Vacancy.source, Vacancy.external_id).in_(keys),
+                Vacancy.url.in_(urls or set()),
+            ),
         )
         result = await self._session.scalars(stmt)
         return list(result)

@@ -120,7 +120,8 @@ class ParsingService:
         finally:
             await context.close()
 
-    def walk_json(self, value: Any) -> Iterator[dict]:
+    @classmethod
+    def walk_json(cls, value: Any) -> Iterator[dict]:
         if isinstance(value, dict):
             item_type = value.get("@type")
             types = item_type if isinstance(item_type, list) else [item_type]
@@ -129,14 +130,15 @@ class ParsingService:
                 yield value
 
             for nested_value in value.values():
-                yield from self.walk_json(nested_value)
+                yield from cls.walk_json(nested_value)
 
         elif isinstance(value, list):
             for item in value:
-                yield from self.walk_json(item)
+                yield from cls.walk_json(item)
 
 
-    def extract_job_postings(self, html: str) -> list[dict]:
+    @classmethod
+    def extract_job_postings(cls, html: str) -> list[dict]:
         tree = LexborHTMLParser(html)
         result: list[dict] = []
 
@@ -151,11 +153,12 @@ class ParsingService:
             except json.JSONDecodeError:
                 continue
 
-            result.extend(self.walk_json(data))
+            result.extend(cls.walk_json(data))
 
         return result
 
-    def normalize_text(self, text: str) -> str:
+    @staticmethod
+    def normalize_text(text: str) -> str:
         result: list[str] = []
         previous_line: str | None = None
 
@@ -174,7 +177,8 @@ class ParsingService:
         return "\n".join(result)
 
 
-    def html_to_clean_text(self, html: str) -> str:
+    @classmethod
+    def html_to_clean_text(cls, html: str) -> str:
         tree = LexborHTMLParser(html)
 
         for node in tree.css(UNWANTED_SELECTORS):
@@ -204,7 +208,7 @@ class ParsingService:
             strip=True,
         )
 
-        return self.normalize_text(text)
+        return cls.normalize_text(text)
 
     def words(self, value: str) -> set[str]:
         return {

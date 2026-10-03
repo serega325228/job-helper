@@ -17,6 +17,7 @@ from src.infrastructure.pdf.pdf import PDFRender
 from src.infrastructure.reranker.vacancy_reranker import VacancyReranker
 from src.infrastructure.vacancy_sources.hh.client import HhApiClient
 from src.infrastructure.vacancy_sources.hh.source import HhVacancySource
+from src.infrastructure.vacancy_sources.linkedin.source import LinkedInVacancySource
 from src.ports.vacancy_normalizer import VacancyNormalizer
 from src.repositories.profile import ProfileRepository
 from src.repositories.prompt import PromptRepository
@@ -35,6 +36,8 @@ from src.services.sercurity import SecurityService
 from src.services.skill_canonicalization import SkillCanonicalizer
 from src.services.vacancy import VacancyService
 from src.services.vacancy_match import VacancyMatchService
+from src.services.vacancy_preview import VacancyPreviewEvaluator
+from src.services.vacancy_scraping import VacancyScrapingService
 
 
 class ConfigProvider(Provider):
@@ -110,6 +113,7 @@ class InfrastructureProvider(Provider):
         scope=Scope.REQUEST,
     )
     hh_source = provide(HhVacancySource, scope=Scope.APP)
+    linkedin_source = provide(LinkedInVacancySource, scope=Scope.APP)
     profile_analyzer = provide(ProfileAnalyzer, scope=Scope.REQUEST)
     vacancy_normalizer = provide(
         VacancyAnalyzer,
@@ -156,6 +160,8 @@ class ServiceProvider(Provider):
     interview_prep_service = provide(InterviewPrepService, scope=Scope.REQUEST)
     profile_service = provide(ProfileService, scope=Scope.REQUEST)
     vacancy_service = provide(VacancyService, scope=Scope.REQUEST)
+    vacancy_preview_evaluator = provide(VacancyPreviewEvaluator, scope=Scope.APP)
+    vacancy_scraping_service = provide(VacancyScrapingService, scope=Scope.APP)
     vacancy_match_service = provide(VacancyMatchService, scope=Scope.REQUEST)
 
     @provide(scope=Scope.APP)

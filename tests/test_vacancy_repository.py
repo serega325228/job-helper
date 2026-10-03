@@ -9,6 +9,22 @@ from src.schemas.vacancy import VacancyHardFilters
 
 
 class VacancyRepositoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_external_keys_also_check_stored_urls(self) -> None:
+        session = AsyncMock()
+        session.scalars.return_value = []
+        repository = VacancyRepository(session)
+
+        await repository.get_by_external_keys(
+            {("linkedin", "42")},
+            urls={"https://www.linkedin.com/jobs/view/42/"},
+        )
+
+        statement = session.scalars.await_args.args[0]
+        compiled = statement.compile(dialect=postgresql.dialect())
+        self.assertIn("vacancies.url IN", str(compiled))
+        self.assertIn(" OR ", str(compiled))
+        self.assertIn(["https://www.linkedin.com/jobs/view/42/"], compiled.params.values())
+
     async def test_builds_query_from_hard_filters(self) -> None:
         expected = object()
         session = AsyncMock()

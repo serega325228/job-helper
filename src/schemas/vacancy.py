@@ -1,9 +1,9 @@
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Self
+from typing import Annotated, Any, Self
 from uuid import UUID
 
-from pydantic import BaseModel, Field, HttpUrl, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 
 class WorkFormat(StrEnum):
@@ -27,6 +27,18 @@ class VacancySearchQuery(BaseModel):
     area_ids: list[str] = Field(default_factory=list)
     experience: list[str] = Field(default_factory=list)
     published_after: datetime | None = None
+
+
+class VacancyScrapingQuery(VacancySearchQuery):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    location: str | None = Field(default=None, min_length=1, max_length=255)
+    required_keywords: list[Annotated[str, Field(min_length=1)]] = Field(
+        default_factory=list
+    )
+    excluded_keywords: list[Annotated[str, Field(min_length=1)]] = Field(
+        default_factory=list
+    )
 
 
 class VacancyHardFilters(BaseModel):
@@ -56,6 +68,37 @@ class VacancyReference(BaseModel):
     title: str = Field(min_length=1, max_length=500)
     url: HttpUrl
     published_at: datetime | None = None
+
+
+class VacancyPreview(VacancyReference):
+    company_name: str | None = Field(default=None, max_length=500)
+    location: str | None = None
+    short_description: str | None = None
+    work_format: WorkFormat | None = None
+    employment_type: EmploymentType | None = None
+    experience: str | None = None
+    seniority: str | None = None
+    salary: str | None = None
+    salary_from: int | None = Field(default=None, ge=0)
+    salary_to: int | None = Field(default=None, ge=0)
+    salary_currency: str | None = None
+    salary_gross: bool | None = None
+
+
+class VacancyScrapingResult(BaseModel):
+    source: str
+    vacancy_ids: list[UUID] = Field(default_factory=list)
+    search_pages: int = 0
+    previews_discovered: int = 0
+    rejected_by_filters: int = 0
+    sent_to_laya: int = 0
+    rejected_by_laya: int = 0
+    detail_pages_enqueued: int = 0
+    detail_pages_scraped: int = 0
+    duplicates_skipped: int = 0
+    failed_pages: int = 0
+    removed_pages: int = 0
+    vacancies_saved: int = 0
 
 
 class RawVacancy(BaseModel):

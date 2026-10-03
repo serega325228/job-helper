@@ -8,8 +8,6 @@ wheels/
 .venv
 
 *.lock
-/tests
-
 .env
 .zed/
 .zed
@@ -24,3 +22,7 @@ tests/*
 !tests/test_llm_provider.py
 !tests/test_runtime_config.py
 !tests/test_resume_generation.py
+!tests/test_linkedin_source.py
+!tests/test_vacancy_preview.py
+!tests/test_vacancy_scraping.py
+!tests/test_model_concurrency.py

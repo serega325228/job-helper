@@ -318,8 +318,7 @@ class ScoringService:
             for vacancy_id, vacancy in vacancies.items()
         ]
 
-        results_raw = await asyncio.to_thread(
-            self._laya.evaluate_batch,
+        results_raw = await self._laya.evaluate_batch(
             states,
             MATCH_QUESTIONS,
         )

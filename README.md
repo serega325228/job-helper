@@ -110,6 +110,66 @@ component makes the combined score zero. These ordinal values are uncalibrated;
 calibration requires labeled matches. Labels and numeric scores are saved in
 `component_scores.laya` with matcher version `structured-laya-rerank-v1`.
 
+## Browser vacancy collection
+
+`VacancyScrapingService.scrape()` runs the browser pipeline independently of HTTP
+handlers or Celery. The initial adapter supports LinkedIn's public job search;
+HeadHunter continues using the existing official API source. Crawlee manages
+browsers, concurrency, request scheduling and retries. Listing cards are parsed
+in bulk with Selectolax Lexbor after rendering; only selected previews become
+`DETAIL` requests.
+
+Call it from an async application entry point:
+
+```python
+from uuid import UUID
+
+from src.di.container import create_container
+from src.infrastructure.vacancy_sources.linkedin.source import LinkedInVacancySource
+from src.schemas.vacancy import VacancyHardFilters, VacancyScrapingQuery
+from src.services.vacancy_scraping import VacancyScrapingService
+
+async def collect(profile_id: UUID):
+    async with create_container() as container:
+        service = await container.get(VacancyScrapingService)
+        source = await container.get(LinkedInVacancySource)
+        return await service.scrape(
+            source,
+            VacancyScrapingQuery(text="Python backend", location="Germany"),
+            profile_id,
+            filters=VacancyHardFilters(work_formats=["remote"]),
+        )
+```
+
+Install Chromium and its Linux system libraries with
+`.venv/bin/playwright install --with-deps chromium` in the deployment image.
+The database schema, a stored profile,
+Laya model, existing normalization LLM configuration, and existing embedding model
+must be available. No new Python dependencies are required. Embeddings are used only by
+the existing persistence/matching flow, never to select previews.
+
+Deterministic checks use explicit known facts and enabled preferences; unknown
+fields remain eligible. `required_keywords` and `excluded_keywords` optionally
+constrain preview text. Laya batches reuse the existing role/skill questions;
+role fit must be `good` or `strong` and skill fit must be at least `weak`.
+Full details go through `RawVacancy`, the existing normalizer, `NormalizedVacancy`,
+and the existing vacancy repository/unit of work. Each handler opens a separate
+Dishka request scope so concurrent pages never share a database session.
+
+`SCRAPING_` environment settings control concurrency (1/3/5), request rate
+(30/minute), search pages (10), unique previews (250), details (50), Laya batch
+size (32), retries (2), and navigation/handler timeouts (30/300 seconds).
+Nested `SCRAPING__...` settings also follow the application's settings convention.
+The native load-more loop stops at its configured limits or the site's end marker.
+Temporary Crawlee storage is isolated per invocation; committed vacancies provide
+deduplication by source/external ID and URL on subsequent runs. An interrupted
+process starts a fresh discovery run; its temporary queue is not a resume store.
+Search retries retain evaluated previews, including successful earlier batches
+when a later listing page fails. Removed detail pages are skipped; exhausted
+failures are logged and reported alongside all pipeline counters in the result.
+Public login/challenge pages are reported as failures. The adapter does not
+authenticate or bypass challenges.
+
 ## Checks
 
 Run the standard-library suite without contacting LLM providers:
