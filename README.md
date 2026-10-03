@@ -153,13 +153,18 @@ fields remain eligible. `required_keywords` and `excluded_keywords` optionally
 constrain preview text. Laya batches reuse the existing role/skill questions;
 role fit must be `good` or `strong` and skill fit must be at least `weak`.
 Full details go through `RawVacancy`, the existing normalizer, `NormalizedVacancy`,
-and the existing vacancy repository/unit of work. Each handler opens a separate
-Dishka request scope so concurrent pages never share a database session.
+and the existing vacancy repository/unit of work. DI providers supply factories
+that open separate request scopes so concurrent handlers never share a database
+session. The scraping service receives its dependencies and pipeline limits
+explicitly; it does not access the Dishka container or application settings.
+`CrawleeProvider` owns per-run crawler construction, temporary storage, and cleanup.
 
-`SCRAPING_` environment settings control concurrency (1/3/5), request rate
-(30/minute), search pages (10), unique previews (250), details (50), Laya batch
-size (32), retries (2), and navigation/handler timeouts (30/300 seconds).
-Nested `SCRAPING__...` settings also follow the application's settings convention.
+`CRAWLEE_` environment settings control concurrency (1/3/5), request rate
+(30/minute), retries (2), navigation/handler timeouts (30/300 seconds), and headless
+mode. `SCRAPING_` settings control search pages (10), unique previews (250), details
+(50), and Laya batch size (32). Move previous browser-related `SCRAPING_` keys to
+`CRAWLEE_`, for example `SCRAPING_MAX_CONCURRENCY` becomes `CRAWLEE_MAX_CONCURRENCY`.
+Nested `CRAWLEE__...` and `SCRAPING__...` settings follow the application's convention.
 The native load-more loop stops at its configured limits or the site's end marker.
 Temporary Crawlee storage is isolated per invocation; committed vacancies provide
 deduplication by source/external ID and URL on subsequent runs. An interrupted

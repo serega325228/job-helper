@@ -1,11 +1,25 @@
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from datetime import timedelta
+from tempfile import TemporaryDirectory
+from typing import AsyncGenerator
 
 import httpx
-from dishka import Provider, Scope, provide
+from crawlee import ConcurrencySettings
+from crawlee.configuration import Configuration
+from crawlee.crawlers._playwright import PlaywrightCrawler
+from crawlee.events import LocalEventManager
+from crawlee.storage_clients._file_system import FileSystemStorageClient
+from dishka import AsyncContainer, Provider, Scope, provide
 from playwright.async_api import Playwright, async_playwright
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.config.settings import Settings, get_settings
+from src.config.settings import (
+    CrawleeSettings,
+    ScrapingSettings,
+    Settings,
+    get_settings,
+)
 from src.exceptions.config import ConfigError
 from src.infrastructure.db.engine import Database
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
@@ -44,6 +58,11 @@ class ConfigProvider(Provider):
     @provide(scope=Scope.APP)
     def settings(self) -> Settings:
         return get_settings()
+
+
+type CrawlerFactory = Callable[[], AbstractAsyncContextManager[PlaywrightCrawler]]
+type UnitOfWorkFactory = Callable[[], AbstractAsyncContextManager[SqlAlchemyUnitOfWork]]
+type VacancyServiceFactory = Callable[[], AbstractAsyncContextManager[VacancyService]]
 
 
 class InfrastructureProvider(Provider):
@@ -112,6 +131,16 @@ class InfrastructureProvider(Provider):
         SqlAlchemyUnitOfWork,
         scope=Scope.REQUEST,
     )
+
+    @provide(scope=Scope.APP)
+    def unit_of_work_factory(self, container: AsyncContainer) -> UnitOfWorkFactory:
+        @asynccontextmanager
+        async def open_unit_of_work() -> AsyncGenerator[SqlAlchemyUnitOfWork]:
+            async with container() as scope:
+                yield await scope.get(SqlAlchemyUnitOfWork)
+
+        return open_unit_of_work
+
     hh_source = provide(HhVacancySource, scope=Scope.APP)
     linkedin_source = provide(LinkedInVacancySource, scope=Scope.APP)
     profile_analyzer = provide(ProfileAnalyzer, scope=Scope.REQUEST)
@@ -146,6 +175,55 @@ class InfrastructureProvider(Provider):
     def laya_provider(self) -> LayaProvider:
         return LayaProvider()
 
+    @provide(scope=Scope.APP)
+    def crawler_factory(
+        self,
+        settings: Settings,
+    ) -> CrawlerFactory:
+        crawlee_settings = settings.crawlee
+        scraping_settings = settings.scraping
+
+        @asynccontextmanager
+        async def open_crawler() -> AsyncGenerator[PlaywrightCrawler]:
+            with TemporaryDirectory(prefix="vacancy-crawl-") as storage_directory:
+                configuration = Configuration(storage_dir=storage_directory)
+                crawler = PlaywrightCrawler(
+                    configuration=configuration,
+                    storage_client=FileSystemStorageClient(),
+                    event_manager=LocalEventManager.from_config(configuration),
+                    configure_logging=False,
+                    concurrency_settings=ConcurrencySettings(
+                        min_concurrency=crawlee_settings.min_concurrency,
+                        desired_concurrency=crawlee_settings.desired_concurrency,
+                        max_concurrency=crawlee_settings.max_concurrency,
+                        max_tasks_per_minute=crawlee_settings.max_requests_per_minute,
+                    ),
+                    max_requests_per_crawl=scraping_settings.max_detail_pages + 1,
+                    max_request_retries=crawlee_settings.max_request_retries,
+                    max_session_rotations=0,
+                    retry_on_blocked=False,
+                    ignore_http_error_status_codes=[404, 410],
+                    navigation_timeout=timedelta(
+                        seconds=crawlee_settings.navigation_timeout_seconds
+                    ),
+                    request_handler_timeout=timedelta(
+                        seconds=crawlee_settings.request_timeout_seconds
+                    ),
+                    headless=crawlee_settings.headless,
+                    fingerprint_generator=None,
+                    use_incognito_pages=True,
+                    goto_options={"wait_until": "domcontentloaded"},
+                )
+                try:
+                    yield crawler
+                finally:
+                    request_queue = await crawler.get_request_manager()
+                    await request_queue.drop()
+                    key_value_store = await crawler.get_key_value_store()
+                    await key_value_store.drop()
+
+        return open_crawler
+
 
 class RepositoryProvider(Provider):
     resume_repository = provide(ResumeRepository, scope=Scope.REQUEST)
@@ -161,8 +239,38 @@ class ServiceProvider(Provider):
     profile_service = provide(ProfileService, scope=Scope.REQUEST)
     vacancy_service = provide(VacancyService, scope=Scope.REQUEST)
     vacancy_preview_evaluator = provide(VacancyPreviewEvaluator, scope=Scope.APP)
-    vacancy_scraping_service = provide(VacancyScrapingService, scope=Scope.APP)
     vacancy_match_service = provide(VacancyMatchService, scope=Scope.REQUEST)
+
+    @provide(scope=Scope.APP)
+    def vacancy_service_factory(
+        self, container: AsyncContainer
+    ) -> VacancyServiceFactory:
+        @asynccontextmanager
+        async def open_vacancy_service() -> AsyncGenerator[VacancyService]:
+            async with container() as scope:
+                yield await scope.get(VacancyService)
+
+        return open_vacancy_service
+
+    @provide(scope=Scope.APP)
+    def vacancy_scraping_service(
+        self,
+        crawler_factory: CrawlerFactory,
+        unit_of_work_factory: UnitOfWorkFactory,
+        vacancy_service_factory: VacancyServiceFactory,
+        evaluator: VacancyPreviewEvaluator,
+        settings: Settings,
+    ) -> VacancyScrapingService:
+        return VacancyScrapingService(
+            crawler_factory,
+            unit_of_work_factory,
+            vacancy_service_factory,
+            evaluator,
+            max_search_pages=settings.scraping.max_search_pages,
+            max_previews=settings.scraping.max_previews,
+            max_detail_pages=settings.scraping.max_detail_pages,
+            laya_batch_size=settings.scraping.laya_batch_size,
+        )
 
     @provide(scope=Scope.APP)
     def security_service(

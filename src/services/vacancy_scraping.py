@@ -1,20 +1,12 @@
-import logging
-from datetime import timedelta
-from tempfile import TemporaryDirectory
 from uuid import UUID
 
-from crawlee import ConcurrencySettings, Request
-from crawlee.configuration import Configuration
-from crawlee.crawlers import PlaywrightCrawler, PlaywrightCrawlingContext
-from crawlee.events import LocalEventManager
-from crawlee.storage_clients import FileSystemStorageClient
-from dishka import AsyncContainer
+from crawlee import Request
+from crawlee.crawlers import PlaywrightCrawlingContext
 from structlog import get_logger
 
-from src.config.settings import Settings
+from src.di.providers import CrawlerFactory, UnitOfWorkFactory, VacancyServiceFactory
 from src.exceptions.profile import ProfileNotFoundError
 from src.exceptions.vacancy import VacancyNormalizationError, VacancyScrapingError
-from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.ports.browser_vacancy_source import BrowserVacancySource
 from src.schemas.vacancy import (
     VacancyHardFilters,
@@ -22,31 +14,38 @@ from src.schemas.vacancy import (
     VacancyScrapingQuery,
     VacancyScrapingResult,
 )
-from src.services.vacancy import VacancyService
 from src.services.vacancy_preview import VacancyPreviewEvaluator
 
 logger = get_logger()
 
-
 class VacancyScrapingService:
     def __init__(
         self,
-        settings: Settings,
-        container: AsyncContainer,
+        crawler_factory: CrawlerFactory,
+        unit_of_work_factory: UnitOfWorkFactory,
+        vacancy_service_factory: VacancyServiceFactory,
         evaluator: VacancyPreviewEvaluator,
+        *,
+        max_search_pages: int,
+        max_previews: int,
+        max_detail_pages: int,
+        laya_batch_size: int,
     ) -> None:
-        self._settings = settings.scraping
-        self._container = container
+        self._crawler_factory = crawler_factory
+        self._unit_of_work_factory = unit_of_work_factory
+        self._vacancy_service_factory = vacancy_service_factory
         self._evaluator = evaluator
+        self._max_search_pages = max_search_pages
+        self._max_previews = max_previews
+        self._max_detail_pages = max_detail_pages
+        self._laya_batch_size = laya_batch_size
 
     async def _existing(self, previews: list[VacancyPreview]) -> set[tuple[str, str]]:
-        async with self._container() as scope:
-            unit_of_work = await scope.get(SqlAlchemyUnitOfWork)
-            async with unit_of_work as uow:
-                vacancies = await uow.vacancies.get_by_external_keys(
-                    {(preview.source, preview.external_id) for preview in previews},
-                    urls={str(preview.url) for preview in previews},
-                )
+        async with self._unit_of_work_factory() as unit_of_work, unit_of_work as uow:
+            vacancies = await uow.vacancies.get_by_external_keys(
+                {(preview.source, preview.external_id) for preview in previews},
+                urls={str(preview.url) for preview in previews},
+            )
         keys = {(vacancy.source, vacancy.external_id) for vacancy in vacancies}
         urls = {vacancy.url for vacancy in vacancies}
         return {
@@ -64,21 +63,18 @@ class VacancyScrapingService:
         filters: VacancyHardFilters | None = None,
     ) -> VacancyScrapingResult:
         filters = filters or VacancyHardFilters()
-        settings = self._settings
         result = VacancyScrapingResult(source=source.source_name)
-        async with self._container() as scope:
-            unit_of_work = await scope.get(SqlAlchemyUnitOfWork)
-            async with unit_of_work as uow:
-                profile = await uow.profiles.get_by_id(profile_id)
-                if profile is None:
-                    raise ProfileNotFoundError(profile_id)
-                preferences = [
-                    preference
-                    for preference in await uow.profiles.get_preferences_by_profile_id(
-                        profile_id
-                    )
-                    if preference.enabled
-                ]
+        async with self._unit_of_work_factory() as unit_of_work, unit_of_work as uow:
+            profile = await uow.profiles.get_by_id(profile_id)
+            if profile is None:
+                raise ProfileNotFoundError(profile_id)
+            preferences = [
+                preference
+                for preference in await uow.profiles.get_preferences_by_profile_id(
+                    profile_id
+                )
+                if preference.enabled
+            ]
 
         processed_keys: set[tuple[str, str]] = set()
         processed_urls: set[str] = set()
@@ -112,12 +108,12 @@ class VacancyScrapingService:
                     profile,
                     preferences,
                     query,
-                    batch_size=settings.laya_batch_size,
+                    batch_size=self._laya_batch_size,
                 )
                 if candidates
                 else []
             )
-            remaining = settings.max_detail_pages - len(planned)
+            remaining = self._max_detail_pages - len(planned)
             for preview in selected[:remaining]:
                 planned[(preview.source, preview.external_id)] = preview
             processed_keys.update(
@@ -130,46 +126,18 @@ class VacancyScrapingService:
             result.sent_to_laya += len(candidates)
             result.rejected_by_laya += len(candidates) - len(selected)
 
-        with TemporaryDirectory(prefix="vacancy-crawl-") as storage_directory:
-            configuration = Configuration(storage_dir=storage_directory)
-            crawler = PlaywrightCrawler(
-                configuration=configuration,
-                storage_client=FileSystemStorageClient(),
-                event_manager=LocalEventManager.from_config(configuration),
-                configure_logging=False,
-                concurrency_settings=ConcurrencySettings(
-                    min_concurrency=settings.min_concurrency,
-                    desired_concurrency=settings.desired_concurrency,
-                    max_concurrency=settings.max_concurrency,
-                    max_tasks_per_minute=settings.max_requests_per_minute,
-                ),
-                max_requests_per_crawl=settings.max_detail_pages + 1,
-                max_request_retries=settings.max_request_retries,
-                max_session_rotations=0,
-                retry_on_blocked=False,
-                ignore_http_error_status_codes=[404, 410],
-                navigation_timeout=timedelta(
-                    seconds=settings.navigation_timeout_seconds
-                ),
-                request_handler_timeout=timedelta(
-                    seconds=settings.request_timeout_seconds
-                ),
-                headless=settings.headless,
-                fingerprint_generator=None,
-                use_incognito_pages=True,
-                goto_options={"wait_until": "domcontentloaded"},
-            )
+        async with self._crawler_factory() as crawler:
 
             @crawler.router.handler("SEARCH")
             async def search_handler(context: PlaywrightCrawlingContext) -> None:
                 if context.response.status in {404, 410}:
                     raise VacancyScrapingError("Search page is unavailable")
                 if (
-                    len(planned) < settings.max_detail_pages
-                    and len(processed_keys) < settings.max_previews
+                    len(planned) < self._max_detail_pages
+                    and len(processed_keys) < self._max_previews
                 ):
                     await source.apply_filters(context.page, query, filters)
-                    for _page_number in range(settings.max_search_pages):
+                    for _page_number in range(self._max_search_pages):
                         previews = await source.parse_previews(context.page)
                         if any(
                             preview.source != source.source_name for preview in previews
@@ -183,7 +151,7 @@ class VacancyScrapingService:
                         )
                         if (
                             signature not in page_signatures
-                            and result.search_pages >= settings.max_search_pages
+                            and result.search_pages >= self._max_search_pages
                         ):
                             break
                         batch_by_key: dict[tuple[str, str], VacancyPreview] = {}
@@ -201,22 +169,22 @@ class VacancyScrapingService:
                                 continue
                             batch_by_key[key] = preview
                             batch_urls.add(url)
-                        remaining = settings.max_previews - len(processed_keys)
+                        remaining = self._max_previews - len(processed_keys)
                         unseen = list(batch_by_key.values())[:remaining]
-                        for offset in range(0, len(unseen), settings.laya_batch_size):
+                        for offset in range(0, len(unseen), self._laya_batch_size):
                             await process_batch(
-                                unseen[offset : offset + settings.laya_batch_size]
+                                unseen[offset : offset + self._laya_batch_size]
                             )
-                            if len(planned) >= settings.max_detail_pages:
+                            if len(planned) >= self._max_detail_pages:
                                 break
                         if signature not in page_signatures:
                             page_signatures.add(signature)
                             result.search_pages += 1
                         if (
                             not previews
-                            or len(planned) >= settings.max_detail_pages
-                            or len(processed_keys) >= settings.max_previews
-                            or _page_number + 1 >= settings.max_search_pages
+                            or len(planned) >= self._max_detail_pages
+                            or len(processed_keys) >= self._max_previews
+                            or _page_number + 1 >= self._max_search_pages
                         ):
                             break
                         if not await source.advance_search(context.page):
@@ -249,8 +217,7 @@ class VacancyScrapingService:
                 if key not in scraped_keys:
                     scraped_keys.add(key)
                     result.detail_pages_scraped += 1
-                async with self._container() as scope:
-                    vacancy_service = await scope.get(VacancyService)
+                async with self._vacancy_service_factory() as vacancy_service:
                     normalized = await vacancy_service.normalize_vacancies([raw])
                     saved = await vacancy_service.save_vacancies([raw], normalized)
                 result.vacancy_ids.extend(vacancy.id for vacancy in saved)
@@ -271,19 +238,9 @@ class VacancyScrapingService:
                     await crawler.add_requests(detail_requests())
                     result.detail_pages_enqueued = len(planned)
 
-            try:
-                await crawler.run(
-                    [
-                        Request.from_url(
-                            source.search_url(query, filters), label="SEARCH"
-                        )
-                    ]
-                )
-            finally:
-                request_queue = await crawler.get_request_manager()
-                await request_queue.drop()
-                key_value_store = await crawler.get_key_value_store()
-                await key_value_store.drop()
+            await crawler.run(
+                [Request.from_url(source.search_url(query, filters), label="SEARCH")]
+            )
 
         logger.info("Vacancy crawl completed: %s", result.model_dump(mode="json"))
         return result

@@ -188,9 +188,9 @@ class HhSettings(BaseSettings):
     request_timeout_seconds: float = Field(default=30.0, gt=0)
 
 
-class ScrapingSettings(BaseSettings):
+class CrawleeSettings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="SCRAPING_",
+        env_prefix="CRAWLEE_",
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
@@ -200,10 +200,6 @@ class ScrapingSettings(BaseSettings):
     desired_concurrency: int = Field(default=3, ge=1)
     max_concurrency: int = Field(default=5, ge=1)
     max_requests_per_minute: int = Field(default=30, ge=1)
-    max_search_pages: int = Field(default=10, ge=1)
-    max_previews: int = Field(default=250, ge=1)
-    max_detail_pages: int = Field(default=50, ge=1)
-    laya_batch_size: int = Field(default=32, ge=1)
     max_request_retries: int = Field(default=2, ge=0)
     navigation_timeout_seconds: float = Field(default=30.0, gt=0)
     request_timeout_seconds: float = Field(default=300.0, gt=0)
@@ -216,6 +212,20 @@ class ScrapingSettings(BaseSettings):
                 "Expected min_concurrency <= desired_concurrency <= max_concurrency"
             )
         return self
+
+
+class ScrapingSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="SCRAPING_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    max_search_pages: int = Field(default=10, ge=1)
+    max_previews: int = Field(default=250, ge=1)
+    max_detail_pages: int = Field(default=50, ge=1)
+    laya_batch_size: int = Field(default=32, ge=1)
 
 
 class LoggingSettings(BaseSettings):
@@ -244,6 +254,7 @@ class Settings(BaseSettings):
     reranker: RerankerSettings = RerankerSettings()
     agents: AgentSettings = AgentSettings()
     hh: HhSettings = HhSettings()
+    crawlee: CrawleeSettings = CrawleeSettings()
     scraping: ScrapingSettings = ScrapingSettings()
     logging: LoggingSettings = LoggingSettings()
 

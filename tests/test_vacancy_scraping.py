@@ -1,21 +1,37 @@
 import unittest
 from collections import Counter
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 
 from crawlee.errors import UserHandlerTimeoutError
 from crawlee.router import Router
+from dishka import Provider, Scope, make_async_container
 from pydantic import ValidationError
 
-from src.config.settings import ScrapingSettings
+from src.config.settings import CrawleeSettings, ScrapingSettings
 from src.di.container import create_container
+from src.di.crawlee_provider import CrawleeProvider
+from src.di.providers import (
+    ConfigProvider,
+    InfrastructureProvider,
+    RepositoryProvider,
+    ServiceProvider,
+)
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.schemas.vacancy import RawVacancy, VacancyPreview, VacancyScrapingQuery
-from src.services.vacancy_scraping import VacancyScrapingService
+from src.services.vacancy import VacancyService
+from src.services.vacancy_preview import VacancyPreviewEvaluator
+from src.services.vacancy_scraping import (
+    CrawlerFactory,
+    UnitOfWorkFactory,
+    VacancyScrapingService,
+    VacancyServiceFactory,
+)
 
 
 def preview(external_id, *, title="Python Developer", url=None):
@@ -165,33 +181,30 @@ class FakeUnitOfWork:
         return None
 
 
-class FakeContainer:
+class FakeDependencies:
     def __init__(self):
         self.profile = SimpleNamespace(id=uuid4())
         self.items = []
         self.scopes = []
         self.normalization_failures = 0
 
-    def __call__(self):
-        container = self
+    @asynccontextmanager
+    async def unit_of_work(self):
+        scope = SimpleNamespace(uow=FakeUnitOfWork(self), service=None)
+        self.scopes.append(scope)
+        yield scope.uow
 
-        class Scope:
-            async def __aenter__(self):
-                self.uow = FakeUnitOfWork(container)
-                self.service = SimpleNamespace(
-                    normalize_vacancies=AsyncMock(side_effect=container.normalize),
-                    save_vacancies=AsyncMock(side_effect=container.save),
-                )
-                container.scopes.append(self)
-                return self
-
-            async def __aexit__(self, *args):
-                return None
-
-            async def get(self, dependency):
-                return self.uow if dependency is SqlAlchemyUnitOfWork else self.service
-
-        return Scope()
+    @asynccontextmanager
+    async def vacancy_service(self):
+        scope = SimpleNamespace(
+            uow=FakeUnitOfWork(self),
+            service=SimpleNamespace(
+                normalize_vacancies=AsyncMock(side_effect=self.normalize),
+                save_vacancies=AsyncMock(side_effect=self.save),
+            ),
+        )
+        self.scopes.append(scope)
+        yield scope.service
 
     async def existing(self, keys, *, urls):
         return [
@@ -224,25 +237,47 @@ class VacancyScrapingTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         FakeCrawler.instances = []
         FakeCrawler.statuses = {}
-        self.container = FakeContainer()
+        self.dependencies = FakeDependencies()
         self.evaluator = FakeEvaluator()
         self.settings = ScrapingSettings(_env_file=None)
+        self.crawlee_settings = CrawleeSettings(_env_file=None)
         self.crawler_patch = patch(
-            "src.services.vacancy_scraping.PlaywrightCrawler", FakeCrawler
+            "src.di.crawlee_provider.PlaywrightCrawler", FakeCrawler
         )
         self.crawler_patch.start()
         self.addCleanup(self.crawler_patch.stop)
+        self.logger = Mock()
+        logger_patch = patch("src.services.vacancy_scraping.logger", self.logger)
+        logger_patch.start()
+        self.addCleanup(logger_patch.stop)
 
     async def scrape(self, source):
-        service = VacancyScrapingService(
-            SimpleNamespace(scraping=self.settings), self.container, self.evaluator
+        configuration = Provider()
+        configuration.provide(
+            lambda: self.crawlee_settings, provides=CrawleeSettings, scope=Scope.APP
         )
-        return await service.scrape(
-            source, VacancyScrapingQuery(text="Python"), self.container.profile.id
+        configuration.provide(
+            lambda: self.settings, provides=ScrapingSettings, scope=Scope.APP
         )
+        async with make_async_container(configuration, CrawleeProvider()) as container:
+            service = VacancyScrapingService(
+                await container.get(CrawlerFactory),
+                self.dependencies.unit_of_work,
+                self.dependencies.vacancy_service,
+                self.evaluator,
+                max_search_pages=self.settings.max_search_pages,
+                max_previews=self.settings.max_previews,
+                max_detail_pages=self.settings.max_detail_pages,
+                laya_batch_size=self.settings.laya_batch_size,
+            )
+            return await service.scrape(
+                source,
+                VacancyScrapingQuery(text="Python"),
+                self.dependencies.profile.id,
+            )
 
     async def test_only_filtered_laya_matches_reach_details_and_storage(self):
-        self.container.items = [
+        self.dependencies.items = [
             SimpleNamespace(
                 source="test", external_id="known", url="https://jobs.example/old"
             ),
@@ -304,8 +339,8 @@ class VacancyScrapingTests(unittest.IsolatedAsyncioTestCase):
     async def test_terminal_search_failure_salvages_accepted_batch(self):
         source = FakeSource([[preview("first")], []], advance_failures=10)
 
-        with self.assertLogs("src.services.vacancy_scraping", level="ERROR"):
-            result = await self.scrape(source)
+        result = await self.scrape(source)
+        self.logger.error.assert_called_once()
 
         self.assertEqual(source.details, ["first"])
         self.assertEqual(self.evaluator.batches, [["first"]])
@@ -315,36 +350,39 @@ class VacancyScrapingTests(unittest.IsolatedAsyncioTestCase):
     async def test_detail_retry_uses_fresh_scopes_and_does_not_double_count_scraped_page(
         self,
     ):
-        self.container.normalization_failures = 1
+        self.dependencies.normalization_failures = 1
         source = FakeSource([[preview("first"), preview("second")]])
 
         result = await self.scrape(source)
 
         service_scopes = [
             scope
-            for scope in self.container.scopes
-            if scope.service.normalize_vacancies.await_count
+            for scope in self.dependencies.scopes
+            if scope.service is not None
+            and scope.service.normalize_vacancies.await_count
         ]
         self.assertEqual(len(service_scopes), 3)
         self.assertEqual(
-            len({id(scope.uow) for scope in self.container.scopes}),
-            len(self.container.scopes),
+            len({id(scope.uow) for scope in self.dependencies.scopes}),
+            len(self.dependencies.scopes),
         )
         self.assertEqual(source.details, ["first", "first", "second"])
         self.assertEqual(result.detail_pages_scraped, 2)
         self.assertEqual(result.vacancies_saved, 2)
 
     async def test_terminal_detail_failure_does_not_stop_other_details(self):
-        self.settings = self.settings.model_copy(update={"max_request_retries": 0})
-        self.container.normalization_failures = 1
+        self.crawlee_settings = self.crawlee_settings.model_copy(
+            update={"max_request_retries": 0}
+        )
+        self.dependencies.normalization_failures = 1
         source = FakeSource([[preview("first"), preview("second")]])
 
-        with self.assertLogs("src.services.vacancy_scraping", level="ERROR"):
-            result = await self.scrape(source)
+        result = await self.scrape(source)
+        self.logger.error.assert_called_once()
 
         self.assertEqual(result.failed_pages, 1)
         self.assertEqual(result.vacancies_saved, 1)
-        self.assertEqual(self.container.items[0].external_id, "second")
+        self.assertEqual(self.dependencies.items[0].external_id, "second")
 
     async def test_removed_details_are_not_parsed_or_retried(self):
         removed = [preview("404"), preview("410")]
@@ -363,16 +401,18 @@ class VacancyScrapingTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_detail_with_changed_identity_is_rejected(self):
-        self.settings = self.settings.model_copy(update={"max_request_retries": 0})
+        self.crawlee_settings = self.crawlee_settings.model_copy(
+            update={"max_request_retries": 0}
+        )
 
-        with self.assertLogs("src.services.vacancy_scraping", level="ERROR"):
-            result = await self.scrape(
-                FakeSource([[preview("first")]], wrong_identity=True)
-            )
+        result = await self.scrape(
+            FakeSource([[preview("first")]], wrong_identity=True)
+        )
+        self.logger.error.assert_called_once()
 
         self.assertEqual(result.failed_pages, 1)
         self.assertEqual(result.vacancies_saved, 0)
-        self.assertEqual(self.container.items, [])
+        self.assertEqual(self.dependencies.items, [])
 
     async def test_page_preview_and_detail_limits_stop_discovery(self):
         for limits, expected_details, expected_pages, expected_previews in [
@@ -381,7 +421,7 @@ class VacancyScrapingTests(unittest.IsolatedAsyncioTestCase):
             ({"max_detail_pages": 1}, 1, 1, 2),
         ]:
             with self.subTest(limits=limits):
-                self.container = FakeContainer()
+                self.dependencies = FakeDependencies()
                 self.evaluator = FakeEvaluator()
                 self.settings = ScrapingSettings(_env_file=None, **limits)
                 source = FakeSource(
@@ -417,21 +457,21 @@ class VacancyScrapingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(options["configure_logging"])
         self.assertFalse(options["retry_on_blocked"])
         self.assertEqual(
-            options["max_request_retries"], self.settings.max_request_retries
+            options["max_request_retries"], self.crawlee_settings.max_request_retries
         )
         self.assertEqual(options["max_session_rotations"], 0)
         self.assertEqual(options["ignore_http_error_status_codes"], [404, 410])
         self.assertEqual(
             options["navigation_timeout"],
-            timedelta(seconds=self.settings.navigation_timeout_seconds),
+            timedelta(seconds=self.crawlee_settings.navigation_timeout_seconds),
         )
         self.assertEqual(
             options["concurrency_settings"].max_tasks_per_minute,
-            self.settings.max_requests_per_minute,
+            self.crawlee_settings.max_requests_per_minute,
         )
         self.assertEqual(
             options["concurrency_settings"].max_concurrency,
-            self.settings.max_concurrency,
+            self.crawlee_settings.max_concurrency,
         )
         self.assertEqual(options["goto_options"], {"wait_until": "domcontentloaded"})
 
@@ -439,19 +479,100 @@ class VacancyScrapingTests(unittest.IsolatedAsyncioTestCase):
         container = create_container()
         await container.close()
 
+    async def test_crawlee_provider_cleans_up_when_a_run_raises(self):
+        with (
+            patch.object(
+                FakeCrawler,
+                "run",
+                AsyncMock(side_effect=RuntimeError("startup failed")),
+            ),
+            self.assertRaisesRegex(RuntimeError, "startup failed"),
+        ):
+            await self.scrape(FakeSource([[preview("first")]]))
+        crawler = FakeCrawler.instances[-1]
+        crawler.queue.drop.assert_awaited_once()
+        crawler.store.drop.assert_awaited_once()
+        self.assertFalse(Path(crawler.options["configuration"].storage_dir).exists())
+
     def test_invalid_scraping_limits_and_concurrency_fail_fast(self):
         for values in [
-            {"min_concurrency": 4},
-            {"desired_concurrency": 6},
             {"max_previews": 0},
             {"max_search_pages": 0},
             {"max_detail_pages": 0},
             {"laya_batch_size": 0},
+        ]:
+            with self.subTest(values=values), self.assertRaises(ValidationError):
+                ScrapingSettings(_env_file=None, **values)
+        for values in [
+            {"min_concurrency": 4},
+            {"desired_concurrency": 6},
             {"max_requests_per_minute": 0},
             {"max_request_retries": -1},
         ]:
             with self.subTest(values=values), self.assertRaises(ValidationError):
-                ScrapingSettings(_env_file=None, **values)
+                CrawleeSettings(_env_file=None, **values)
+
+    async def test_scoped_dependencies_are_created_and_closed_by_providers(self):
+        overrides = Provider()
+        closed = []
+
+        async def unit_of_work():
+            dependency = FakeUnitOfWork(self.dependencies)
+            try:
+                yield dependency
+            finally:
+                closed.append(dependency)
+
+        async def vacancy_service():
+            dependency = SimpleNamespace(
+                normalize_vacancies=AsyncMock(side_effect=self.dependencies.normalize),
+                save_vacancies=AsyncMock(side_effect=self.dependencies.save),
+            )
+            try:
+                yield dependency
+            finally:
+                closed.append(dependency)
+
+        overrides.provide(
+            unit_of_work,
+            provides=SqlAlchemyUnitOfWork,
+            scope=Scope.REQUEST,
+            override=True,
+        )
+        overrides.provide(
+            vacancy_service, provides=VacancyService, scope=Scope.REQUEST, override=True
+        )
+        overrides.provide(
+            lambda: self.evaluator,
+            provides=VacancyPreviewEvaluator,
+            scope=Scope.APP,
+            override=True,
+        )
+        async with make_async_container(
+            ConfigProvider(),
+            CrawleeProvider(),
+            InfrastructureProvider(),
+            RepositoryProvider(),
+            ServiceProvider(),
+            overrides,
+        ) as container:
+            for dependency_type in (UnitOfWorkFactory, VacancyServiceFactory):
+                factory = await container.get(dependency_type)
+                async with factory() as first:
+                    async with factory() as second:
+                        self.assertIsNot(first, second)
+                        self.assertNotIn(first, closed)
+                        self.assertNotIn(second, closed)
+                    self.assertIn(second, closed)
+                    self.assertNotIn(first, closed)
+                self.assertIn(first, closed)
+            service = await container.get(VacancyScrapingService)
+            result = await service.scrape(
+                FakeSource([[preview("provider")]]),
+                VacancyScrapingQuery(text="Python"),
+                self.dependencies.profile.id,
+            )
+            self.assertEqual(result.vacancies_saved, 1)
 
 
 if __name__ == "__main__":
