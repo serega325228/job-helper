@@ -1,5 +1,5 @@
-from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from tempfile import TemporaryDirectory
 from typing import AsyncGenerator
@@ -23,15 +23,18 @@ from src.config.settings import (
 from src.exceptions.config import ConfigError
 from src.infrastructure.db.engine import Database
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
+from src.infrastructure.embedding.llama_server import LlamaServerEmbedder
 from src.infrastructure.laya.laya_provider import LayaProvider
 from src.infrastructure.llm.llm import LLMConfigManager, LLMProvider
 from src.infrastructure.llm.profile_analyzer import ProfileAnalyzer
 from src.infrastructure.llm.vacancy_analyzer import VacancyAnalyzer
 from src.infrastructure.pdf.pdf import PDFRender
-from src.infrastructure.reranker.vacancy_reranker import VacancyReranker
+from src.infrastructure.reranker.llama_server import LlamaServerReranker
 from src.infrastructure.vacancy_sources.hh.client import HhApiClient
 from src.infrastructure.vacancy_sources.hh.source import HhVacancySource
 from src.infrastructure.vacancy_sources.linkedin.source import LinkedInVacancySource
+from src.ports.embedding import Embedder
+from src.ports.reranker import Reranker
 from src.ports.vacancy_normalizer import VacancyNormalizer
 from src.repositories.profile import ProfileRepository
 from src.repositories.prompt import PromptRepository
@@ -40,7 +43,6 @@ from src.repositories.vacancy import VacancyRepository
 from src.repositories.vacancy_match import VacancyMatchRepository
 from src.schemas.llm import FeatureConfig
 from src.services.cover_letter import CoverLetterService
-from src.services.embedding import EmbeddingService
 from src.services.improver import ImproverService
 from src.services.interview_prep import InterviewPrepService
 from src.services.profile import ProfileService
@@ -51,18 +53,18 @@ from src.services.skill_canonicalization import SkillCanonicalizer
 from src.services.vacancy import VacancyService
 from src.services.vacancy_match import VacancyMatchService
 from src.services.vacancy_preview import VacancyPreviewEvaluator
-from src.services.vacancy_scraping import VacancyScrapingService
+from src.services.vacancy_scraping import (
+    CrawlerFactory,
+    UnitOfWorkFactory,
+    VacancyScrapingService,
+    VacancyServiceFactory,
+)
 
 
 class ConfigProvider(Provider):
     @provide(scope=Scope.APP)
     def settings(self) -> Settings:
         return get_settings()
-
-
-type CrawlerFactory = Callable[[], AbstractAsyncContextManager[PlaywrightCrawler]]
-type UnitOfWorkFactory = Callable[[], AbstractAsyncContextManager[SqlAlchemyUnitOfWork]]
-type VacancyServiceFactory = Callable[[], AbstractAsyncContextManager[VacancyService]]
 
 
 class InfrastructureProvider(Provider):
@@ -155,11 +157,52 @@ class InfrastructureProvider(Provider):
         return SkillCanonicalizer()
 
     @provide(scope=Scope.APP)
-    def vacancy_reranker(self, settings: Settings) -> VacancyReranker:
-        return VacancyReranker(
-            settings.reranker.model_name,
-            batch_size=settings.reranker.batch_size,
-        )
+    async def vacancy_reranker(self, settings: Settings) -> AsyncIterator[Reranker]:
+        config = settings.reranker
+        if config.backend == "local":
+            from src.infrastructure.reranker.vacancy_reranker import VacancyReranker
+
+            yield VacancyReranker(config.model_name, batch_size=config.batch_size)
+        else:
+            headers = (
+                {"Authorization": f"Bearer {config.api_key.get_secret_value()}"}
+                if config.api_key
+                else {}
+            )
+            async with httpx.AsyncClient(
+                base_url=str(config.base_url),
+                timeout=config.request_timeout_seconds,
+                headers=headers,
+            ) as client:
+                yield LlamaServerReranker(
+                    client, config.server_model_name, batch_size=config.batch_size
+                )
+
+    @provide(scope=Scope.APP)
+    def embedding_service(self, settings: Settings) -> Iterator[Embedder]:
+        config = settings.embedding
+        if config.backend == "local":
+            from src.infrastructure.embedding.embedding import EmbeddingService
+
+            service = EmbeddingService(str(config.resolved_model_path))
+            try:
+                yield service
+            finally:
+                service.close()
+        else:
+            headers = (
+                {"Authorization": f"Bearer {config.api_key.get_secret_value()}"}
+                if config.api_key
+                else {}
+            )
+            with httpx.Client(
+                base_url=str(config.base_url),
+                timeout=config.request_timeout_seconds,
+                headers=headers,
+            ) as client:
+                yield LlamaServerEmbedder(
+                    client, config.server_model_name, batch_size=config.batch_size
+                )
 
     @provide(scope=Scope.APP)
     async def playwright(self) -> AsyncIterator[Playwright]:
@@ -282,8 +325,8 @@ class ServiceProvider(Provider):
     @provide(scope=Scope.REQUEST)
     def scoring_service(
         self,
-        reranker: VacancyReranker,
-        embedding_service: EmbeddingService,
+        reranker: Reranker,
+        embedding_service: Embedder,
         skill_canonicalizer: SkillCanonicalizer,
         laya: LayaProvider,
     ) -> ScoringService:
@@ -293,17 +336,6 @@ class ServiceProvider(Provider):
             skill_canonicalizer,
             laya,
         )
-
-    @provide(scope=Scope.APP)
-    def embedding_service(
-        self,
-        settings: Settings,
-    ) -> Iterator[EmbeddingService]:
-        service = EmbeddingService(str(settings.embedding.resolved_model_path))
-        try:
-            yield service
-        finally:
-            service.close()
 
     @provide(scope=Scope.REQUEST)
     def cover_letter(

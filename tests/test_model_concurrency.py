@@ -4,7 +4,7 @@ from threading import Event, Lock
 from unittest.mock import Mock, patch
 
 from src.infrastructure.laya.laya_provider import LayaProvider
-from src.services.embedding import EmbeddingService
+from src.infrastructure.embedding.embedding import EmbeddingService
 
 
 class ModelConcurrencyTest(unittest.TestCase):
@@ -64,7 +64,7 @@ class ModelConcurrencyTest(unittest.TestCase):
 
     def test_embedding_queries_and_documents_share_one_guard(self):
         model = Mock()
-        with patch("src.services.embedding.Llama", return_value=model):
+        with patch("src.infrastructure.embedding.embedding.Llama", return_value=model):
             service = EmbeddingService("mock.gguf")
         self.assert_serialized(
             (model.embed,),
@@ -85,7 +85,7 @@ class ModelConcurrencyTest(unittest.TestCase):
 
         model.embed.side_effect = inference
         model.close.side_effect = closed.set
-        with patch("src.services.embedding.Llama", return_value=model):
+        with patch("src.infrastructure.embedding.embedding.Llama", return_value=model):
             service = EmbeddingService("mock.gguf")
 
         def close():

@@ -10,6 +10,7 @@ from src.config.retry import RetryableLlmError, llm_retry
 from src.exceptions.vacancy import VacancyNormalizationError
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.models.vacancy import Vacancy
+from src.ports.embedding import Embedder
 from src.ports.vacancy_normalizer import VacancyNormalizer
 from src.ports.vacancy_source import VacancySource
 from src.schemas.vacancy import (
@@ -19,7 +20,6 @@ from src.schemas.vacancy import (
     VacancyReference,
     VacancySearchQuery,
 )
-from src.services.embedding import EmbeddingService
 from src.services.embedding_text import build_vacancy_search_text
 
 logger = get_logger()
@@ -30,7 +30,7 @@ class VacancyService:
         self,
         unit_of_work: SqlAlchemyUnitOfWork,
         normalizer: VacancyNormalizer,
-        embedding_service: EmbeddingService,
+        embedding_service: Embedder,
     ) -> None:
         self._uow = unit_of_work
         self._normalizer = normalizer

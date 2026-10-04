@@ -26,3 +26,4 @@ tests/*
 !tests/test_vacancy_preview.py
 !tests/test_vacancy_scraping.py
 !tests/test_model_concurrency.py
+!tests/test_llama_server.py

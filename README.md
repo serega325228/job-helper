@@ -110,6 +110,72 @@ component makes the combined score zero. These ordinal values are uncalibrated;
 calibration requires labeled matches. Labels and numeric scores are saved in
 `component_scores.laya` with matcher version `structured-laya-rerank-v1`.
 
+## Embedding and reranking backends
+
+`Embedder` and `Reranker` protocols in `src/ports` let services use either backend.
+Both default to `llama_server`. The previous `EmbeddingService` lives in
+`src/infrastructure/embedding/embedding.py`; the previous `VacancyReranker` remains
+in `src/infrastructure/reranker/vacancy_reranker.py`. Local libraries are imported
+only when their backend is selected. DI owns and closes the HTTP clients and the
+local embedding model.
+
+Configure independent servers in `.env` (URLs are server roots, without `/v1`):
+
+```dotenv
+EMBEDDING_BACKEND=llama_server
+EMBEDDING_BASE_URL=http://localhost:8081
+EMBEDDING_SERVER_MODEL_NAME=Qwen3-Embedding-0.6B-Q8_0.gguf
+RERANKER_BACKEND=llama_server
+RERANKER_BASE_URL=http://localhost:8082
+RERANKER_SERVER_MODEL_NAME=Qwen3-Reranker-0.6B-Q8_0.gguf
+```
+
+Each backend also accepts `*_API_KEY` for optional Bearer authentication,
+`*_REQUEST_TIMEOUT_SECONDS` (default 120), and `*_BATCH_SIZE` (default 16).
+Nested `EMBEDDING__...` and `RERANKER__...` settings are also supported. When the
+application runs in Docker, use server container hostnames and their internal
+ports instead of `localhost`.
+
+For example, run the two CPU servers with the official llama.cpp Docker image:
+
+```sh
+docker run --rm -p 8081:8080 -v "$PWD/.models:/models:ro" \
+  ghcr.io/ggml-org/llama.cpp:server \
+  -m /models/Qwen3-Embedding-0.6B-Q8_0.gguf \
+  --alias Qwen3-Embedding-0.6B-Q8_0.gguf \
+  --embedding --pooling last --host 0.0.0.0 --port 8080 \
+  --ctx-size 8192 --batch-size 8192 --ubatch-size 8192 --parallel 1
+
+docker run --rm -p 8082:8080 ghcr.io/ggml-org/llama.cpp:server \
+  -hf ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF \
+  --alias Qwen3-Reranker-0.6B-Q8_0.gguf \
+  --embedding --pooling rank --host 0.0.0.0 --port 8080 \
+  --ctx-size 8192 --batch-size 8192 --ubatch-size 8192 --parallel 1
+```
+
+The adapters use llama.cpp's documented [`/v1/embeddings` and `/v1/rerank`
+endpoints](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
+The embedder applies Qwen's `Instruct: ...\nQuery: ...` query format; documents have
+no instruction. [Qwen3-Embedding-0.6B supports reduced embedding
+dimensions](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B), so the adapter keeps
+the first 768 components and normalizes them again to match the existing database
+columns. Reranking restores input order from response indexes and preserves
+Qwen's scores in the 0–1 range. Invalid response indexes, dimensions, vectors,
+and scores fail before persistence; HTTP failures propagate to callers.
+
+To select the previous implementations independently, set `EMBEDDING_BACKEND=local`
+with `EMBEDDING_MODEL_PATH` pointing to its GGUF, and/or `RERANKER_BACKEND=local`
+with `RERANKER_MODEL_NAME=BAAI/bge-reranker-v2-m3`. The local embedding prompts and
+pooling behavior remain unchanged. Switching embedding models or prompt formats
+requires regenerating **all** vacancy and preference embeddings before matching;
+equal dimensions do not make vectors from different models comparable.
+
+Run the HTTP adapter checks without running Docker or downloading models:
+
+```sh
+LITELLM_LOCAL_MODEL_COST_MAP=True .venv/bin/python -m unittest discover -s tests -p test_llama_server.py
+```
+
 ## Browser vacancy collection
 
 `VacancyScrapingService.scrape()` runs the browser pipeline independently of HTTP

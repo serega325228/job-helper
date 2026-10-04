@@ -1,12 +1,14 @@
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from uuid import UUID
 
 from crawlee import Request
-from crawlee.crawlers import PlaywrightCrawlingContext
+from crawlee.crawlers import PlaywrightCrawler, PlaywrightCrawlingContext
 from structlog import get_logger
 
-from src.di.providers import CrawlerFactory, UnitOfWorkFactory, VacancyServiceFactory
 from src.exceptions.profile import ProfileNotFoundError
 from src.exceptions.vacancy import VacancyNormalizationError, VacancyScrapingError
+from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.ports.browser_vacancy_source import BrowserVacancySource
 from src.schemas.vacancy import (
     VacancyHardFilters,
@@ -14,9 +16,15 @@ from src.schemas.vacancy import (
     VacancyScrapingQuery,
     VacancyScrapingResult,
 )
+from src.services.vacancy import VacancyService
 from src.services.vacancy_preview import VacancyPreviewEvaluator
 
+type CrawlerFactory = Callable[[], AbstractAsyncContextManager[PlaywrightCrawler]]
+type UnitOfWorkFactory = Callable[[], AbstractAsyncContextManager[SqlAlchemyUnitOfWork]]
+type VacancyServiceFactory = Callable[[], AbstractAsyncContextManager[VacancyService]]
+
 logger = get_logger()
+
 
 class VacancyScrapingService:
     def __init__(

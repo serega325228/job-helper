@@ -1,10 +1,11 @@
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import (
     Field,
+    HttpUrl,
     PrivateAttr,
     SecretStr,
     model_validator,
@@ -87,6 +88,13 @@ class EmbeddingSettings(BaseSettings):
         extra="ignore",
     )
 
+    embedding_dimensions: int = 768
+    backend: Literal["local", "llama_server"] = "llama_server"
+    base_url: HttpUrl = HttpUrl("http://localhost:8081")
+    server_model_name: str = Field(default="Qwen3-Embedding-0.6B-Q8_0.gguf", min_length=1)
+    api_key: SecretStr | None = None
+    request_timeout_seconds: float = Field(default=120.0, gt=0)
+    batch_size: int = Field(default=16, ge=1)
     model_path: Path = (
         Path(__file__).parent.parent.parent
         / ".models"
@@ -159,6 +167,11 @@ class RerankerSettings(BaseSettings):
         extra="ignore",
     )
 
+    backend: Literal["local", "llama_server"] = "llama_server"
+    base_url: HttpUrl = HttpUrl("http://localhost:8082")
+    server_model_name: str = Field(default="Qwen3-Reranker-0.6B-Q8_0.gguf", min_length=1)
+    api_key: SecretStr | None = None
+    request_timeout_seconds: float = Field(default=120.0, gt=0)
     model_name: str = "BAAI/bge-reranker-v2-m3"
     batch_size: int = Field(default=16, ge=1)
     candidate_limit: int = Field(default=40, ge=1)

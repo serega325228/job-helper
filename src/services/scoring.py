@@ -10,7 +10,8 @@ from src.infrastructure.laya.questions import MATCH_QUESTIONS
 from src.infrastructure.models.preference_intent import PreferenceIntent
 from src.infrastructure.models.profile import Profile
 from src.infrastructure.models.vacancy import Vacancy
-from src.infrastructure.reranker.vacancy_reranker import VacancyReranker
+from src.ports.embedding import Embedder
+from src.ports.reranker import Reranker
 from src.schemas.scoring import (
     LayaComparison,
     PreferenceComparison,
@@ -18,7 +19,6 @@ from src.schemas.scoring import (
     VacancyRerankScores,
 )
 from src.schemas.vacancy import VacancySoftConditions
-from src.services.embedding import EmbeddingService
 from src.services.embedding_text import (
     build_preference_search_text,
     build_preference_title_text,
@@ -70,8 +70,8 @@ class ScoringService:
 
     def __init__(
         self,
-        reranker: VacancyReranker,
-        embedding_service: EmbeddingService,
+        reranker: Reranker,
+        embedding_service: Embedder,
         skill_canonicalizer: SkillCanonicalizer,
         laya: LayaProvider,
     ) -> None:
