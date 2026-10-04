@@ -1,10 +1,11 @@
+import asyncio
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Lock
 from unittest.mock import Mock, patch
 
 from src.infrastructure.laya.laya_provider import LayaProvider
-from src.infrastructure.embedding.embedding import EmbeddingService
+from src.infrastructure.embedder.local import EmbeddingService
 
 
 class ModelConcurrencyTest(unittest.TestCase):
@@ -62,14 +63,14 @@ class ModelConcurrencyTest(unittest.TestCase):
         model.predict.assert_called_once()
         model.predict_batch.assert_called_once()
 
-    def test_embedding_queries_and_documents_share_one_guard(self):
+    def test_embedding_calls_share_one_guard(self):
         model = Mock()
-        with patch("src.infrastructure.embedding.embedding.Llama", return_value=model):
+        with patch("src.infrastructure.embedder.local.Llama", return_value=model):
             service = EmbeddingService("mock.gguf")
         self.assert_serialized(
             (model.embed,),
-            lambda: service.embed_queries(["Python"]),
-            lambda: service.embed_documents([("Developer", "Python")]),
+            lambda: asyncio.run(service.embed(["Python"])),
+            lambda: asyncio.run(service.embed(["Developer\nPython"])),
         )
         self.assertEqual(model.embed.call_count, 2)
 
@@ -85,7 +86,7 @@ class ModelConcurrencyTest(unittest.TestCase):
 
         model.embed.side_effect = inference
         model.close.side_effect = closed.set
-        with patch("src.infrastructure.embedding.embedding.Llama", return_value=model):
+        with patch("src.infrastructure.embedder.local.Llama", return_value=model):
             service = EmbeddingService("mock.gguf")
 
         def close():
@@ -93,7 +94,7 @@ class ModelConcurrencyTest(unittest.TestCase):
             service.close()
 
         with ThreadPoolExecutor(max_workers=2) as executor:
-            call = executor.submit(service.embed_query, "Python")
+            call = executor.submit(asyncio.run, service.embed(["Python"]))
             try:
                 self.assertTrue(entered.wait(1))
                 cleanup = executor.submit(close)
@@ -106,12 +107,8 @@ class ModelConcurrencyTest(unittest.TestCase):
         self.assertTrue(closed.is_set())
         service.close()
         model.close.assert_called_once()
-        for call in (
-            lambda: service.embed_query("Python"),
-            lambda: service.embed_document("Python"),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "Embedding service is closed"):
-                call()
+        with self.assertRaisesRegex(RuntimeError, "Embedding service is closed"):
+            asyncio.run(service.embed(["Python"]))
         model.embed.assert_called_once()
 
 

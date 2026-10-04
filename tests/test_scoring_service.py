@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 from uuid import uuid4
 
 from src.infrastructure.laya.laya_provider import LayaProvider
@@ -25,12 +25,9 @@ class FakeReranker:
 class FakeEmbeddingService:
     model_name = "fake-embedding"
 
-    def embed_queries(self, texts: list[str]) -> list[list[float]]:
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        self.texts = texts
         return [[1.0, float(index)] for index, _ in enumerate(texts)]
-
-
-async def run_inline(function, *args):
-    return function(*args)
 
 
 def make_profile() -> Profile:
@@ -234,8 +231,12 @@ class ScoringServiceTests(unittest.IsolatedAsyncioTestCase):
         preference.content_embedding = None
         preference.title_embedding = None
 
-        with patch("src.services.scoring.asyncio.to_thread", new=run_inline):
-            await self.service.update_preference_embeddings([preference])
+        await self.service.update_preference_embeddings([preference])
+        self.assertEqual(
+            self.service._embedder.texts[0],
+            "Instruct: Given a job search query, retrieve relevant job vacancies"
+            f"\nQuery: {build_preference_title_text(preference)}",
+        )
 
         self.assertEqual(preference.title_embedding, [1.0, 0.0])
         self.assertEqual(preference.content_embedding, [1.0, 1.0])

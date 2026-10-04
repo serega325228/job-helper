@@ -9,7 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import Boolean, DateTime, String, Text
 
 from src.infrastructure.models.base import Base
-from src.infrastructure.models.constants import EMBEDDING_DIMENSIONS
+from src.ports.embedder import EMBEDDING_DIMENSIONS
 
 if TYPE_CHECKING:
     from src.infrastructure.models.vacancy_match import VacancyMatch

@@ -10,7 +10,7 @@ from src.config.retry import RetryableLlmError, llm_retry
 from src.exceptions.vacancy import VacancyNormalizationError
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.models.vacancy import Vacancy
-from src.ports.embedding import Embedder
+from src.ports.embedder import Embedder
 from src.ports.vacancy_normalizer import VacancyNormalizer
 from src.ports.vacancy_source import VacancySource
 from src.schemas.vacancy import (
@@ -30,11 +30,11 @@ class VacancyService:
         self,
         unit_of_work: SqlAlchemyUnitOfWork,
         normalizer: VacancyNormalizer,
-        embedding_service: Embedder,
+        embedder: Embedder,
     ) -> None:
         self._uow = unit_of_work
         self._normalizer = normalizer
-        self._embedding = embedding_service
+        self._embedder = embedder
 
     async def ingest_vacancies(
         self,
@@ -332,14 +332,10 @@ class VacancyService:
             for vacancy in normalized_vacancies
         ]
         content_documents = [
-            (title, build_vacancy_search_text(vacancy))
+            f"{title}\n{build_vacancy_search_text(vacancy)}"
             for title, vacancy in zip(titles, normalized_vacancies, strict=True)
         ]
-        title_documents = [(None, title) for title in titles]
-        vectors = await asyncio.to_thread(
-            self._embedding.embed_documents,
-            content_documents + title_documents,
-        )
+        vectors = await self._embedder.embed(content_documents + titles)
         split_at = len(normalized_vacancies)
         content_vectors = vectors[:split_at]
         title_vectors = vectors[split_at:]

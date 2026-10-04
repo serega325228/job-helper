@@ -88,7 +88,6 @@ class EmbeddingSettings(BaseSettings):
         extra="ignore",
     )
 
-    embedding_dimensions: int = 768
     backend: Literal["local", "llama_server"] = "llama_server"
     base_url: HttpUrl = HttpUrl("http://localhost:8081")
     server_model_name: str = Field(default="Qwen3-Embedding-0.6B-Q8_0.gguf", min_length=1)

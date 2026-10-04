@@ -114,8 +114,8 @@ calibration requires labeled matches. Labels and numeric scores are saved in
 
 `Embedder` and `Reranker` protocols in `src/ports` let services use either backend.
 Both default to `llama_server`. The previous `EmbeddingService` lives in
-`src/infrastructure/embedding/embedding.py`; the previous `VacancyReranker` remains
-in `src/infrastructure/reranker/vacancy_reranker.py`. Local libraries are imported
+`src/infrastructure/embedder/local.py`; the previous `VacancyReranker` remains
+in `src/infrastructure/reranker/local.py`. Local libraries are imported
 only when their backend is selected. DI owns and closes the HTTP clients and the
 local embedding model.
 
@@ -155,18 +155,25 @@ docker run --rm -p 8082:8080 ghcr.io/ggml-org/llama.cpp:server \
 
 The adapters use llama.cpp's documented [`/v1/embeddings` and `/v1/rerank`
 endpoints](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
-The embedder applies Qwen's `Instruct: ...\nQuery: ...` query format; documents have
-no instruction. [Qwen3-Embedding-0.6B supports reduced embedding
-dimensions](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B), so the adapter keeps
-the first 768 components and normalizes them again to match the existing database
-columns. Reranking restores input order from response indexes and preserves
+Both HTTP adapters use `httpx.AsyncClient`. Embedders expose one generic async
+`embed(texts)` method and receive already prepared text. `ScoringService` applies
+Qwen's `Instruct: ...\nQuery: ...` format for job searches; `VacancyService` combines
+vacancy titles and content without a query instruction. Embeddings use all 1024
+components without truncation. The shared `EMBEDDING_DIMENSIONS` constant lives
+in `src/ports/embedder.py` and also defines the database vector column widths.
+Reranking restores input order from response indexes and preserves
 Qwen's scores in the 0–1 range. Invalid response indexes, dimensions, vectors,
 and scores fail before persistence; HTTP failures propagate to callers.
 
 To select the previous implementations independently, set `EMBEDDING_BACKEND=local`
 with `EMBEDDING_MODEL_PATH` pointing to its GGUF, and/or `RERANKER_BACKEND=local`
-with `RERANKER_MODEL_NAME=BAAI/bge-reranker-v2-m3`. The local embedding prompts and
-pooling behavior remain unchanged. Switching embedding models or prompt formats
+with `RERANKER_MODEL_NAME=BAAI/bge-reranker-v2-m3`. Local inference runs in a worker
+thread with its existing model lock; prompt preparation belongs to services.
+The local embedding model must also produce 1024 components.
+Existing databases with 768-component vector columns need a schema migration to
+`vector(1024)` for both title and content in `vacancies` and `preference_intents`;
+changing the Python models does not alter existing tables.
+Switching embedding dimensions, models, or prompt formats
 requires regenerating **all** vacancy and preference embeddings before matching;
 equal dimensions do not make vectors from different models comparable.
 

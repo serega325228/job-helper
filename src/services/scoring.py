@@ -10,7 +10,7 @@ from src.infrastructure.laya.questions import MATCH_QUESTIONS
 from src.infrastructure.models.preference_intent import PreferenceIntent
 from src.infrastructure.models.profile import Profile
 from src.infrastructure.models.vacancy import Vacancy
-from src.ports.embedding import Embedder
+from src.ports.embedder import Embedder
 from src.ports.reranker import Reranker
 from src.schemas.scoring import (
     LayaComparison,
@@ -71,12 +71,12 @@ class ScoringService:
     def __init__(
         self,
         reranker: Reranker,
-        embedding_service: Embedder,
+        embedder: Embedder,
         skill_canonicalizer: SkillCanonicalizer,
         laya: LayaProvider,
     ) -> None:
         self._reranker = reranker
-        self._embedding = embedding_service
+        self._embedder = embedder
         self._skills = skill_canonicalizer
         self._laya = laya
 
@@ -88,14 +88,15 @@ class ScoringService:
             return
 
         texts = [
-            text
+            "Instruct: Given a job search query, retrieve relevant job vacancies"
+            f"\nQuery: {text}"
             for preference in preferences
             for text in (
                 build_preference_title_text(preference),
                 build_preference_search_text(preference),
             )
         ]
-        vectors = await asyncio.to_thread(self._embedding.embed_queries, texts)
+        vectors = await self._embedder.embed(texts)
 
         for index, preference in enumerate(preferences):
             preference.title_embedding = vectors[index * 2]

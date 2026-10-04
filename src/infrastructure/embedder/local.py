@@ -23,48 +23,16 @@ class EmbeddingService:
         self._lock = Lock()
         self._closed = False
 
-    def embed_query(self, text: str) -> list[float]:
-        return self.embed_queries([text])[0]
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        return await to_thread(self._embed, texts)
 
-    def embed_queries(self, texts: list[str]) -> list[list[float]]:
-        prompts = [f"task: search result | query: {text}" for text in texts]
+    def _embed(self, texts: list[str]) -> list[list[float]]:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Embedding service is closed")
-            return to_thread(self._model.embed, prompts, normalize=True)
-
-    def embed_document(
-        self,
-        text: str,
-        *,
-        title: str | None = None,
-    ) -> list[float]:
-        return self.embed_documents([(title, text)])[0]
-
-    def embed_documents(
-        self,
-        documents: list[tuple[str | None, str]],
-    ) -> list[list[float]]:
-        prompts = [
-            f"title: {title or 'none'} | text: {text}" for title, text in documents
-        ]
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("Embedding service is closed")
-            return to_thread(self._model.embed, prompts, normalize=True)
-
-    def embed_vacancy(
-        self,
-        title: str,
-        text: str,
-    ) -> list[float]:
-        return self.embed_document(text, title=title)
-
-    def embed_vacancies(
-        self,
-        vacancies: list[tuple[str, str]],
-    ) -> list[list[float]]:
-        return self.embed_documents(vacancies)
+            return self._model.embed(texts, normalize=True)
 
     def close(self) -> None:
         with self._lock:

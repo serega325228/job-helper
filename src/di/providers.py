@@ -1,4 +1,5 @@
-from collections.abc import AsyncIterator, Iterator
+from asyncio import to_thread
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from tempfile import TemporaryDirectory
@@ -23,7 +24,7 @@ from src.config.settings import (
 from src.exceptions.config import ConfigError
 from src.infrastructure.db.engine import Database
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
-from src.infrastructure.embedding.llama_server import LlamaServerEmbedder
+from src.infrastructure.embedder.llama_server import LlamaServerEmbedder
 from src.infrastructure.laya.laya_provider import LayaProvider
 from src.infrastructure.llm.llm import LLMConfigManager, LLMProvider
 from src.infrastructure.llm.profile_analyzer import ProfileAnalyzer
@@ -33,7 +34,7 @@ from src.infrastructure.reranker.llama_server import LlamaServerReranker
 from src.infrastructure.vacancy_sources.hh.client import HhApiClient
 from src.infrastructure.vacancy_sources.hh.source import HhVacancySource
 from src.infrastructure.vacancy_sources.linkedin.source import LinkedInVacancySource
-from src.ports.embedding import Embedder
+from src.ports.embedder import Embedder
 from src.ports.reranker import Reranker
 from src.ports.vacancy_normalizer import VacancyNormalizer
 from src.repositories.profile import ProfileRepository
@@ -157,10 +158,10 @@ class InfrastructureProvider(Provider):
         return SkillCanonicalizer()
 
     @provide(scope=Scope.APP)
-    async def vacancy_reranker(self, settings: Settings) -> AsyncIterator[Reranker]:
+    async def reranker(self, settings: Settings) -> AsyncIterator[Reranker]:
         config = settings.reranker
         if config.backend == "local":
-            from src.infrastructure.reranker.vacancy_reranker import VacancyReranker
+            from src.infrastructure.reranker.local import VacancyReranker
 
             yield VacancyReranker(config.model_name, batch_size=config.batch_size)
         else:
@@ -179,23 +180,23 @@ class InfrastructureProvider(Provider):
                 )
 
     @provide(scope=Scope.APP)
-    def embedding_service(self, settings: Settings) -> Iterator[Embedder]:
+    async def embedder(self, settings: Settings) -> AsyncGenerator[Embedder]:
         config = settings.embedding
         if config.backend == "local":
-            from src.infrastructure.embedding.embedding import EmbeddingService
+            from src.infrastructure.embedder.local import EmbeddingService
 
             service = EmbeddingService(str(config.resolved_model_path))
             try:
                 yield service
             finally:
-                service.close()
+                await to_thread(service.close)
         else:
             headers = (
                 {"Authorization": f"Bearer {config.api_key.get_secret_value()}"}
                 if config.api_key
                 else {}
             )
-            with httpx.Client(
+            async with httpx.AsyncClient(
                 base_url=str(config.base_url),
                 timeout=config.request_timeout_seconds,
                 headers=headers,
@@ -326,13 +327,13 @@ class ServiceProvider(Provider):
     def scoring_service(
         self,
         reranker: Reranker,
-        embedding_service: Embedder,
+        embedder: Embedder,
         skill_canonicalizer: SkillCanonicalizer,
         laya: LayaProvider,
     ) -> ScoringService:
         return ScoringService(
             reranker,
-            embedding_service,
+            embedder,
             skill_canonicalizer,
             laya,
         )

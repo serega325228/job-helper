@@ -1,6 +1,5 @@
 import unittest
 from datetime import UTC, datetime
-from unittest.mock import patch
 
 from src.exceptions.vacancy import VacancyNormalizationError
 from src.infrastructure.vacancy_sources.hh.source import HhVacancySource
@@ -127,15 +126,12 @@ class FakeUnitOfWork:
 class FakeEmbeddingService:
     model_name = "fake-embedding"
 
-    def embed_documents(
+    async def embed(
         self,
-        documents: list[tuple[str | None, str]],
+        texts: list[str],
     ) -> list[list[float]]:
-        return [[float(index), 1.0] for index, _ in enumerate(documents)]
-
-
-async def run_inline(function, *args):
-    return function(*args)
+        self.texts = texts
+        return [[float(index), 1.0] for index, _ in enumerate(texts)]
 
 
 class VacancyServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -173,9 +169,10 @@ class VacancyServiceTests(unittest.IsolatedAsyncioTestCase):
             published_after=datetime(2026, 8, 1, tzinfo=UTC),
         )
 
-        with patch("src.services.vacancy.asyncio.to_thread", new=run_inline):
-            first = await service.ingest_vacancies(source, query)
-            second = await service.ingest_vacancies(source, query)
+        first = await service.ingest_vacancies(source, query)
+        second = await service.ingest_vacancies(source, query)
+        self.assertTrue(service._embedder.texts[0].startswith(f"{first[0].title}\n"))
+        self.assertEqual(service._embedder.texts[1], first[0].title)
 
         self.assertEqual(len(first), 1)
         self.assertEqual(len(second), 1)

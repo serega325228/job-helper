@@ -1,5 +1,4 @@
 import json
-import math
 import unittest
 from unittest.mock import Mock, patch
 
@@ -8,23 +7,22 @@ from pydantic import ValidationError
 
 from src.config.settings import EmbeddingSettings, RerankerSettings, Settings
 from src.di.container import create_container
-from src.infrastructure.embedding.llama_server import LlamaServerEmbedder
-from src.infrastructure.models.constants import EMBEDDING_DIMENSIONS
+from src.infrastructure.embedder.llama_server import LlamaServerEmbedder
 from src.infrastructure.reranker.llama_server import LlamaServerReranker
-from src.ports.embedding import Embedder
+from src.ports.embedder import EMBEDDING_DIMENSIONS, Embedder
 from src.ports.reranker import Reranker
 
 
-class LlamaServerEmbeddingTest(unittest.TestCase):
-    def service(self, handler, *, batch_size=16):
-        client = httpx.Client(
+class LlamaServerEmbeddingTest(unittest.IsolatedAsyncioTestCase):
+    async def service(self, handler, *, batch_size=16):
+        client = httpx.AsyncClient(
             base_url="http://llama.example/",
             transport=httpx.MockTransport(handler),
         )
-        self.addCleanup(client.close)
+        self.addAsyncCleanup(client.aclose)
         return LlamaServerEmbedder(client, "qwen-embedding", batch_size=batch_size)
 
-    def test_batches_restore_input_order_and_normalize_reduced_vectors(self):
+    async def test_batches_restore_input_order_and_preserve_full_vectors(self):
         requests = []
 
         def handle(request):
@@ -38,33 +36,27 @@ class LlamaServerEmbeddingTest(unittest.TestCase):
                         {
                             "index": index,
                             "embedding": ([3.0, 4.0] if index == 0 else [4.0, 3.0])
-                            + [0.0] * (EMBEDDING_DIMENSIONS - 2)
-                            + [100.0] * 256,
+                            + [0.0] * (EMBEDDING_DIMENSIONS - 2),
                         }
                         for index in reversed(range(len(payload["input"])))
                     ]
                 },
             )
 
-        service = self.service(handle, batch_size=2)
-        vectors = service.embed_queries(["Python", "Go", "Rust"])
+        service = await self.service(handle, batch_size=2)
+        vectors = await service.embed(["Python", "Go", "Rust"])
         self.assertEqual(len(vectors), 3)
         self.assertEqual([len(payload["input"]) for payload in requests], [2, 1])
         self.assertEqual(requests[0]["model"], "qwen-embedding")
         self.assertEqual(requests[0]["encoding_format"], "float")
+        self.assertEqual(requests[0]["input"], ["Python", "Go"])
         self.assertEqual(
-            requests[0]["input"][0],
-            "Instruct: Given a job search query, retrieve relevant job vacancies"
-            "\nQuery: Python",
-        )
-        self.assertEqual(
-            [vector[:2] for vector in vectors], [[0.6, 0.8], [0.8, 0.6], [0.6, 0.8]]
+            [vector[:2] for vector in vectors], [[3.0, 4.0], [4.0, 3.0], [3.0, 4.0]]
         )
         for vector in vectors:
             self.assertEqual(len(vector), EMBEDDING_DIMENSIONS)
-            self.assertAlmostEqual(math.hypot(*vector), 1.0)
 
-    def test_document_prompts_and_convenience_methods(self):
+    async def test_input_texts_are_sent_unchanged(self):
         prompts = []
 
         def handle(request):
@@ -80,21 +72,18 @@ class LlamaServerEmbeddingTest(unittest.TestCase):
                 },
             )
 
-        service = self.service(handle)
-        self.assertEqual(len(service.embed_document("Python")), EMBEDDING_DIMENSIONS)
-        service.embed_vacancy("Developer", "Go")
-        service.embed_vacancies([("Engineer", "Rust")])
+        service = await self.service(handle)
+        vectors = await service.embed(["Python", "Developer\nGo", "Engineer\nRust"])
         self.assertEqual(prompts, ["Python", "Developer\nGo", "Engineer\nRust"])
-        self.assertEqual(len(service.embed_query("Python")), EMBEDDING_DIMENSIONS)
+        self.assertEqual(len(vectors), 3)
 
-    def test_empty_batches_do_not_call_server(self):
+    async def test_empty_batches_do_not_call_server(self):
         handler = Mock()
-        service = self.service(handler)
-        self.assertEqual(service.embed_queries([]), [])
-        self.assertEqual(service.embed_documents([]), [])
+        service = await self.service(handler)
+        self.assertEqual(await service.embed([]), [])
         handler.assert_not_called()
 
-    def test_invalid_responses_are_rejected(self):
+    async def test_invalid_responses_are_rejected(self):
         valid = {"index": 0, "embedding": [1.0] * EMBEDDING_DIMENSIONS}
         for payload in (
             {},
@@ -103,29 +92,30 @@ class LlamaServerEmbeddingTest(unittest.TestCase):
             {"data": [{**valid, "index": 1}]},
             {"data": [{**valid, "index": False}]},
             {"data": [{**valid, "embedding": [1.0]}]},
+            {"data": [{**valid, "embedding": [1.0] * (EMBEDDING_DIMENSIONS + 1)}]},
             {"data": [{**valid, "embedding": [0.0] * EMBEDDING_DIMENSIONS}]},
             {"data": [{**valid, "embedding": ["nan"] * EMBEDDING_DIMENSIONS}]},
             {"data": [{**valid, "embedding": [True] * EMBEDDING_DIMENSIONS}]},
             {"data": [{**valid, "embedding": [[1.0] * EMBEDDING_DIMENSIONS]}]},
         ):
             with self.subTest(payload_type=str(payload)[:80]):
-                service = self.service(
+                service = await self.service(
                     lambda request: httpx.Response(200, json=payload)
                 )
                 with self.assertRaises(ValueError):
-                    service.embed_query("Python")
+                    await service.embed(["Python"])
 
-    def test_http_and_transport_errors_propagate(self):
-        service = self.service(lambda request: httpx.Response(503))
+    async def test_http_and_transport_errors_propagate(self):
+        service = await self.service(lambda request: httpx.Response(503))
         with self.assertRaises(httpx.HTTPStatusError):
-            service.embed_query("Python")
+            await service.embed(["Python"])
 
         def timeout(request):
             raise httpx.ReadTimeout("Timed out", request=request)
 
-        service = self.service(timeout)
+        service = await self.service(timeout)
         with self.assertRaises(httpx.ReadTimeout):
-            service.embed_document("Python")
+            await service.embed(["Python"])
 
 
 class LlamaServerRerankerTest(unittest.IsolatedAsyncioTestCase):
@@ -241,9 +231,9 @@ class ModelBackendTest(unittest.IsolatedAsyncioTestCase):
         with (
             patch("src.di.providers.get_settings", return_value=settings),
             patch.object(EmbeddingSettings, "resolved_model_path", "mock.gguf"),
-            patch("src.infrastructure.embedding.embedding.Llama") as llama,
+            patch("src.infrastructure.embedder.local.Llama") as llama,
             patch(
-                "src.infrastructure.reranker.vacancy_reranker.CrossEncoder"
+                "src.infrastructure.reranker.local.CrossEncoder"
             ) as encoder,
         ):
             async with create_container() as container:
