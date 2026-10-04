@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 import httpx
 from pydantic import ValidationError
 
-from src.config.settings import EmbeddingSettings, RerankerSettings, Settings
+from src.config.settings import EmbeddingSettings, HhSettings, RerankerSettings, Settings
 from src.di.container import create_container
 from src.infrastructure.embedder.llama_server import LlamaServerEmbedder
 from src.infrastructure.reranker.llama_server import LlamaServerReranker
@@ -197,11 +197,18 @@ class ModelBackendTest(unittest.IsolatedAsyncioTestCase):
     async def test_server_selection_and_client_cleanup(self):
         settings = Settings(
             _env_file=None,
+            hh=HhSettings(_env_file=None, request_timeout_seconds=15.0),
             embedding=EmbeddingSettings(
-                _env_file=None, backend="llama_server", api_key="embedding-key"
+                _env_file=None,
+                backend="llama_server",
+                api_key="embedding-key",
+                request_timeout_seconds=35.0,
             ),
             reranker=RerankerSettings(
-                _env_file=None, backend="llama_server", api_key="reranker-key"
+                _env_file=None,
+                backend="llama_server",
+                api_key="reranker-key",
+                request_timeout_seconds=75.0,
             ),
         )
         with patch("src.di.providers.get_settings", return_value=settings):
@@ -210,15 +217,36 @@ class ModelBackendTest(unittest.IsolatedAsyncioTestCase):
                 reranker = await container.get(Reranker)
                 self.assertIsInstance(embedder, LlamaServerEmbedder)
                 self.assertIsInstance(reranker, LlamaServerReranker)
+                hh_client = await container.get(httpx.AsyncClient, component="hh")
+                self.assertIs(
+                    await container.get(httpx.AsyncClient, component="embedding"),
+                    embedder._client,
+                )
+                self.assertIs(
+                    await container.get(httpx.AsyncClient, component="reranker"),
+                    reranker._client,
+                )
+                self.assertIsNot(hh_client, embedder._client)
+                self.assertIsNot(hh_client, reranker._client)
+                self.assertIsNot(embedder._client, reranker._client)
+                self.assertNotIn("Authorization", hh_client.headers)
                 self.assertEqual(
                     embedder._client.headers["Authorization"], "Bearer embedding-key"
                 )
                 self.assertEqual(
                     reranker._client.headers["Authorization"], "Bearer reranker-key"
                 )
-                self.assertEqual(embedder._client.timeout.read, 120.0)
-                self.assertEqual(reranker._client.timeout.read, 120.0)
+                self.assertEqual(hh_client.timeout.read, 15.0)
+                self.assertEqual(embedder._client.timeout.read, 35.0)
+                self.assertEqual(reranker._client.timeout.read, 75.0)
                 self.assertIs(await container.get(Embedder), embedder)
+                async with container() as request_scope:
+                    self.assertIs(
+                        await request_scope.get(httpx.AsyncClient, component="hh"),
+                        hh_client,
+                    )
+                self.assertFalse(hh_client.is_closed)
+            self.assertTrue(hh_client.is_closed)
             self.assertTrue(embedder._client.is_closed)
             self.assertTrue(reranker._client.is_closed)
 

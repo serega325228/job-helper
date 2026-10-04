@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from tempfile import TemporaryDirectory
-from typing import AsyncGenerator
+from typing import Annotated, AsyncGenerator
 
 import httpx
 from crawlee import ConcurrencySettings
@@ -11,7 +11,7 @@ from crawlee.configuration import Configuration
 from crawlee.crawlers._playwright import PlaywrightCrawler
 from crawlee.events import LocalEventManager
 from crawlee.storage_clients._file_system import FileSystemStorageClient
-from dishka import AsyncContainer, Provider, Scope, provide
+from dishka import AsyncContainer, FromComponent, Provider, Scope, provide
 from playwright.async_api import Playwright, async_playwright
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -87,12 +87,48 @@ class InfrastructureProvider(Provider):
             yield session
 
     @provide(scope=Scope.APP)
-    async def http_client(
+    async def hh_http_client(
         self,
         settings: Settings,
-    ) -> AsyncIterator[httpx.AsyncClient]:
+    ) -> AsyncIterator[Annotated[httpx.AsyncClient, FromComponent("hh")]]:
         async with httpx.AsyncClient(
             timeout=settings.hh.request_timeout_seconds,
+        ) as client:
+            yield client
+
+    @provide(scope=Scope.APP)
+    async def embedding_http_client(
+        self,
+        settings: Settings,
+    ) -> AsyncIterator[Annotated[httpx.AsyncClient, FromComponent("embedding")]]:
+        config = settings.embedding
+        headers = (
+            {"Authorization": f"Bearer {config.api_key.get_secret_value()}"}
+            if config.api_key
+            else {}
+        )
+        async with httpx.AsyncClient(
+            base_url=str(config.base_url),
+            timeout=config.request_timeout_seconds,
+            headers=headers,
+        ) as client:
+            yield client
+
+    @provide(scope=Scope.APP)
+    async def reranker_http_client(
+        self,
+        settings: Settings,
+    ) -> AsyncIterator[Annotated[httpx.AsyncClient, FromComponent("reranker")]]:
+        config = settings.reranker
+        headers = (
+            {"Authorization": f"Bearer {config.api_key.get_secret_value()}"}
+            if config.api_key
+            else {}
+        )
+        async with httpx.AsyncClient(
+            base_url=str(config.base_url),
+            timeout=config.request_timeout_seconds,
+            headers=headers,
         ) as client:
             yield client
 
@@ -118,7 +154,7 @@ class InfrastructureProvider(Provider):
     @provide(scope=Scope.APP)
     def hh_client(
         self,
-        http_client: httpx.AsyncClient,
+        http_client: Annotated[httpx.AsyncClient, FromComponent("hh")],
         settings: Settings,
     ) -> HhApiClient:
         access_token = settings.hh.access_token
@@ -158,29 +194,27 @@ class InfrastructureProvider(Provider):
         return SkillCanonicalizer()
 
     @provide(scope=Scope.APP)
-    async def reranker(self, settings: Settings) -> AsyncIterator[Reranker]:
+    async def reranker(
+        self,
+        settings: Settings,
+        http_client: Annotated[httpx.AsyncClient, FromComponent("reranker")],
+    ) -> AsyncIterator[Reranker]:
         config = settings.reranker
         if config.backend == "local":
             from src.infrastructure.reranker.local import VacancyReranker
 
             yield VacancyReranker(config.model_name, batch_size=config.batch_size)
         else:
-            headers = (
-                {"Authorization": f"Bearer {config.api_key.get_secret_value()}"}
-                if config.api_key
-                else {}
+            yield LlamaServerReranker(
+                http_client, config.server_model_name, batch_size=config.batch_size
             )
-            async with httpx.AsyncClient(
-                base_url=str(config.base_url),
-                timeout=config.request_timeout_seconds,
-                headers=headers,
-            ) as client:
-                yield LlamaServerReranker(
-                    client, config.server_model_name, batch_size=config.batch_size
-                )
 
     @provide(scope=Scope.APP)
-    async def embedder(self, settings: Settings) -> AsyncGenerator[Embedder]:
+    async def embedder(
+        self,
+        settings: Settings,
+        http_client: Annotated[httpx.AsyncClient, FromComponent("embedding")],
+    ) -> AsyncGenerator[Embedder]:
         config = settings.embedding
         if config.backend == "local":
             from src.infrastructure.embedder.local import EmbeddingService
@@ -191,19 +225,9 @@ class InfrastructureProvider(Provider):
             finally:
                 await to_thread(service.close)
         else:
-            headers = (
-                {"Authorization": f"Bearer {config.api_key.get_secret_value()}"}
-                if config.api_key
-                else {}
+            yield LlamaServerEmbedder(
+                http_client, config.server_model_name, batch_size=config.batch_size
             )
-            async with httpx.AsyncClient(
-                base_url=str(config.base_url),
-                timeout=config.request_timeout_seconds,
-                headers=headers,
-            ) as client:
-                yield LlamaServerEmbedder(
-                    client, config.server_model_name, batch_size=config.batch_size
-                )
 
     @provide(scope=Scope.APP)
     async def playwright(self) -> AsyncIterator[Playwright]:

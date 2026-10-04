@@ -132,6 +132,12 @@ RERANKER_SERVER_MODEL_NAME=Qwen3-Reranker-0.6B-Q8_0.gguf
 
 Each backend also accepts `*_API_KEY` for optional Bearer authentication,
 `*_REQUEST_TIMEOUT_SECONDS` (default 120), and `*_BATCH_SIZE` (default 16).
+HTTP connection pools live in the Dishka `hh`, `embedding`, and `reranker`
+components. Each client uses its own service settings, stays cached at
+`Scope.APP`, and is closed by its async generator when the container closes.
+Consumers select their client with
+`Annotated[httpx.AsyncClient, FromComponent("hh")]` (or `"embedding"`/`"reranker"`).
+HH's timeout no longer controls clients for the model services.
 Nested `EMBEDDING__...` and `RERANKER__...` settings are also supported. When the
 application runs in Docker, use server container hostnames and their internal
 ports instead of `localhost`.
