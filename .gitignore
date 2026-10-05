@@ -7,6 +7,10 @@ wheels/
 
 .venv
 
+.aws/
+.codex/
+.agents/
+.ruff_cache/
 *.lock
 .env
 .zed/
