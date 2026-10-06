@@ -132,6 +132,21 @@ class LLMSettings(BaseSettings):
     def config(self, value: LLMConfig | None) -> None:
         self._config = value
 
+class TaskiqSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        env_prefix="TASKIQ_",
+        extra="ignore",
+    )
+    rabbitmq_url: str = "amqp://guest:guest@rabbitmq:5672/"
+
+    exchange_name: str = "job-helper"
+    exchange_type: str = "direct"
+
+    io_queue: str = "io"
+    laya_queue: str = "laya"
+
 
 class RefinerSettings(BaseSettings):
     """Configuration for refinement passes."""
@@ -266,6 +281,7 @@ class Settings(BaseSettings):
     reranker: RerankerSettings = RerankerSettings()
     agents: AgentSettings = AgentSettings()
     hh: HhSettings = HhSettings()
+    taskiq: TaskiqSettings = TaskiqSettings()
     crawlee: CrawleeSettings = CrawleeSettings()
     scraping: ScrapingSettings = ScrapingSettings()
     logging: LoggingSettings = LoggingSettings()

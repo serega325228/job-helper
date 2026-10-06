@@ -12,6 +12,19 @@ wheels = [
 ]
 
 [[package]]
+name = "aio-pika"
+version = "10.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiormq" },
+    { name = "yarl" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2a/77/9f8ae466a9e8d16ee4136bf12fea656160fbfbd32295d1df8248c92e77b8/aio_pika-10.1.0.tar.gz", hash = "sha256:ec340bff09d169a367717a4dd822969dac9cc5e835e22a67020e3613784f3139", size = 86810, upload-time = "2026-09-27T11:28:07.651Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a3/7d/4204ac838183657bd08ca25d0e6a825d646c50c7941368819a9bbee6411e/aio_pika-10.1.0-py3-none-any.whl", hash = "sha256:8dd8aa4514328876e9208970b7dae3a7650afb3373906a2a530286742ebe0f74", size = 58042, upload-time = "2026-09-27T11:28:06.092Z" },
+]
+
+[[package]]
 name = "aiohappyeyeballs"
 version = "2.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -76,6 +89,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/5e/19/08d41839658bdd44a0ed2480f3891705ecb487ce28c0dde62c9040c997e0/aiohttp-3.14.3-cp314-cp314t-win32.whl", hash = "sha256:b304db572b4368edd8dda8a2274f73156fe15558fca4a917cb8a09fc47af5963", size = 474180, upload-time = "2026-07-23T01:57:19.306Z" },
     { url = "https://files.pythonhosted.org/packages/99/5d/3cd6ef0a2b2851f7ab913b5b079334781bd50ff56a323e4454063377a080/aiohttp-3.14.3-cp314-cp314t-win_amd64.whl", hash = "sha256:b20032766aedf6261c7a566585a40867d092ac03a0d81592d5370ef9b054f99b", size = 500528, upload-time = "2026-07-23T01:57:21.762Z" },
     { url = "https://files.pythonhosted.org/packages/a4/37/cfd1ed540a4d318da025590d96b728e63713c09e9377950fc655dadeb856/aiohttp-3.14.3-cp314-cp314t-win_arm64.whl", hash = "sha256:2e1161602f45a54de2ce0905243a95f58cb42dcd378402f3697f5e0b21e9d2e7", size = 469280, upload-time = "2026-07-23T01:57:24.241Z" },
+]
+
+[[package]]
+name = "aiormq"
+version = "7.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pamqp" },
+    { name = "yarl" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5c/09/42586119acc0c0d705fdb810c8a155c11827598faa54301e58c119a4e684/aiormq-7.2.1.tar.gz", hash = "sha256:05d55dfbdba0c3854ceb5f118855b0d47fa15fbd08dae1b9c4c0415237c769aa", size = 74840, upload-time = "2026-09-29T07:18:24.224Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a6/e9/8c10248926849a9dab64e0b01804f4749ef0940eaa2723574656425b7dc1/aiormq-7.2.1-py3-none-any.whl", hash = "sha256:4a96b0dce49880f3677976863b680414417eb00d0a9e3d381664bd86c64cea11", size = 39750, upload-time = "2026-09-29T07:18:22.604Z" },
 ]
 
 [[package]]
@@ -1071,6 +1097,8 @@ dependencies = [
     { name = "sentence-transformers" },
     { name = "sqlalchemy" },
     { name = "structlog" },
+    { name = "taskiq" },
+    { name = "taskiq-aio-pika" },
     { name = "tenacity" },
     { name = "textual" },
 ]
@@ -1099,6 +1127,8 @@ requires-dist = [
     { name = "sentence-transformers", specifier = ">=5.7.0" },
     { name = "sqlalchemy", specifier = ">=2.0.51" },
     { name = "structlog", specifier = ">=26.1.0" },
+    { name = "taskiq", specifier = ">=0.13.0" },
+    { name = "taskiq-aio-pika", specifier = ">=0.6.1" },
     { name = "tenacity", specifier = ">=9.1.4" },
     { name = "textual", specifier = ">=8.2.8" },
 ]
@@ -1882,6 +1912,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pamqp"
+version = "4.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/31/4c/33a0ddaaac7bc42f9a542dbaaee8b580ceca3f89bf5da7c498d1fa97ff9a/pamqp-4.0.1.tar.gz", hash = "sha256:9dd13b828e346622793981f14a5df817fce5de998c746209d6c0154eb8403970", size = 137192, upload-time = "2026-07-06T16:37:51.732Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/71/14/1dfc08b743ba995a38dee0ea09beb46a05c7fe8ac53d729095905f7bf11d/pamqp-4.0.1-py3-none-any.whl", hash = "sha256:a547f45128b06e42ce8d7a739b0cfcc40f2c724770622eaaff4a3f587b1cf7d0", size = 32773, upload-time = "2026-07-06T16:37:50.623Z" },
+]
+
+[[package]]
 name = "pgvector"
 version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2008,6 +2047,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/1b/7d/92392ff7815c21062bea51aa7b87d45576f649f16458d78b7cf94b9ab2e6/pycparser-3.0.tar.gz", hash = "sha256:600f49d217304a5902ac3c37e1281c9fe94e4d0489de643a9504c5cdfdfc6b29", size = 103492, upload-time = "2026-01-21T14:26:51.89Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl", hash = "sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992", size = 48172, upload-time = "2026-01-21T14:26:50.693Z" },
+]
+
+[[package]]
+name = "pycron"
+version = "3.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/6a/bf/dc33987a3275ad7c9f7785d14bd5e9e58cd396e62ac15b6822576ffbeeb5/pycron-3.3.0.tar.gz", hash = "sha256:877017822a65b949713b4746dcd3a3ff5bbd8b26db55e20e472dc191ea539d69", size = 71121, upload-time = "2026-09-17T07:41:46.472Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/20/b2/520fca1c0f4fb0334721e2ea187a650074492df7112209d45acb40032100/pycron-3.3.0-py3-none-any.whl", hash = "sha256:ab04a1ffa01257cc809de777cad1bf2e1a329ec6986059585b730269b7a18806", size = 5006, upload-time = "2026-09-17T07:41:45.519Z" },
 ]
 
 [[package]]
@@ -2679,6 +2727,45 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/83/d3/803453b36afefb7c2bb238361cd4ae6125a569b4db67cd9e79846ba2d68c/sympy-1.14.0.tar.gz", hash = "sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517", size = 7793921, upload-time = "2025-04-27T18:05:01.611Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl", hash = "sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5", size = 6299353, upload-time = "2025-04-27T18:04:59.103Z" },
+]
+
+[[package]]
+name = "taskiq"
+version = "0.13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "anyio" },
+    { name = "pycron" },
+    { name = "pydantic" },
+    { name = "taskiq-dependencies" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/09/c6/a6e5a15158e1db35b458f68f40b3e44c32134d7edad6bfcdb5bbd4128174/taskiq-0.13.0.tar.gz", hash = "sha256:7d56609a6c5a20b0c9da67e9f310ec9640266f620b8f81880bccd5f16913e687", size = 411167, upload-time = "2026-09-26T14:45:16.997Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/59/9c/c4fb8085424ef1c5479877f0f16f8dc4b406dcf6f367d51464bbf134d086/taskiq-0.13.0-py3-none-any.whl", hash = "sha256:b51e1961d8919bc897caa6f5484ac08d812341413a20a3704b69c597c4c154d2", size = 94856, upload-time = "2026-09-26T14:45:15.768Z" },
+]
+
+[[package]]
+name = "taskiq-aio-pika"
+version = "0.6.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aio-pika" },
+    { name = "taskiq" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/85/69/1b58c2e76bf96405a3e481fe653c9e96fad7b20990501b996f2e856a1005/taskiq_aio_pika-0.6.1.tar.gz", hash = "sha256:9f25fcc78cc4ae13ad771f5adfb4fca2d80d6ab444a9e85625ba74a9e8d570c0", size = 10271, upload-time = "2026-09-16T12:51:01.863Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/57/ea/c0b76496a5058701da357407ed14cfa880a0b900241d21196f5e10e4f586/taskiq_aio_pika-0.6.1-py3-none-any.whl", hash = "sha256:a807e9bac4da4069c5411323fbe621718cc6e858001d661c2dc84755a410bbb0", size = 11491, upload-time = "2026-09-16T12:51:00.896Z" },
+]
+
+[[package]]
+name = "taskiq-dependencies"
+version = "1.5.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/90/47a627696e53bfdcacabc3e8c05b73bf1424685bcb5f17209cb8b12da1bf/taskiq_dependencies-1.5.7.tar.gz", hash = "sha256:0d3b240872ef152b719153b9526d866d2be978aeeaea6600e878414babc2dcb4", size = 14875, upload-time = "2025-02-26T22:07:39.876Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/99/6d/4a012f2de002c2e93273f5e7d3e3feea02f7fdbb7b75ca2ca1dd10703091/taskiq_dependencies-1.5.7-py3-none-any.whl", hash = "sha256:6fcee5d159bdb035ef915d4d848826169b6f06fe57cc2297a39b62ea3e76036f", size = 13801, upload-time = "2025-02-26T22:07:38.622Z" },
 ]
 
 [[package]]

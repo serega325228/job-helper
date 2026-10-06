@@ -1,13 +1,19 @@
 from contextlib import asynccontextmanager
 
-import structlog
-from dishka.integrations.fastapi import setup_dishka
+from dishka.integrations.fastapi import setup_dishka as setup_fastapi_dishka
+from dishka.integrations.taskiq import setup_dishka as setup_taskiq_dishka
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from langgraph.graph.state import CompiledStateGraph
 from pydantic.dataclasses import dataclass
 from src.graphs.supervisor.tools import SupervisorToolHandlers
+from structlog import get_logger
+from taskiq_aio_pika.broker import AioPikaBroker
+
+from src.infrastructure.taskiq.broker import broker
+from src.routers.config import router as config_router
+from src.routers.health import router as health_router
 
 from config.logging import configure_logging
 from di.container import create_container
@@ -26,10 +32,6 @@ settings = get_settings()
 configure_logging(settings.logging)
 
 logger = get_logger()
-
-repositories = create_repositories(settings)
-services = create_services(repositories, settings)
-models = create_model_registry(settings)
 
 profile_graph = create_profile_graph(models.worker, services)
 search_graph = create_search_graph(services)
@@ -81,9 +83,13 @@ container = create_container()
 app.add_exception_handler(ConfigError, config_error_handler)
 app.add_exception_handler(LLMError, llm_error_handler)
 app.add_exception_handler(RequestValidationError, config_validation_error_handler)
-setup_dishka(
+setup_fastapi_dishka(
     container=container,
     app=app,
+)
+setup_taskiq_dishka(
+    container=container,
+    broker=broker,
 )
 
 

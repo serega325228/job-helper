@@ -27,6 +27,8 @@ dependencies = [
     "sentence-transformers>=5.7.0",
     "sqlalchemy>=2.0.51",
     "structlog>=26.1.0",
+    "taskiq>=0.13.0",
+    "taskiq-aio-pika>=0.6.1",
     "tenacity>=9.1.4",
     "textual>=8.2.8",
 ]
