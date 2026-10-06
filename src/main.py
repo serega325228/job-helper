@@ -1,76 +1,45 @@
 from contextlib import asynccontextmanager
 
 from dishka.integrations.fastapi import setup_dishka as setup_fastapi_dishka
-from dishka.integrations.taskiq import setup_dishka as setup_taskiq_dishka
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from langgraph.graph.state import CompiledStateGraph
-from pydantic.dataclasses import dataclass
-from src.graphs.supervisor.tools import SupervisorToolHandlers
 from structlog import get_logger
-from taskiq_aio_pika.broker import AioPikaBroker
 
-from src.infrastructure.taskiq.broker import broker
-from src.routers.config import router as config_router
-from src.routers.health import router as health_router
-
-from config.logging import configure_logging
-from di.container import create_container
-from src.agents.supervisor.tools import create_supervisor_tools
+from src.config.logging import configure_logging
 from src.config.settings import get_settings
+from src.di.container import create_container
 from src.exceptions.config import ConfigError, LLMError
 from src.infrastructure.llm.llm import LLMConfigManager
+from src.infrastructure.taskiq.broker import io_broker, laya_broker
 from src.routers.config import (
     config_error_handler,
     config_validation_error_handler,
     llm_error_handler,
 )
+from src.routers.config import router as config_router
+from src.routers.health import router as health_router
+from src.routers.vacancy import router as vacancy_router
 
 settings = get_settings()
 
-configure_logging(settings.logging)
-
 logger = get_logger()
-
-profile_graph = create_profile_graph(models.worker, services)
-search_graph = create_search_graph(services)
-resume_graph = create_resume_graph(services)
-matching_graph = create_matching_graph(services)
-preparation_graph = create_preparation_graph(services)
-
-handlers = SupervisorToolHandlers(
-    profile_graph=profile_graph,
-    search_graph=search_graph,
-    resume_graph=resume_graph,
-    matching_graph=matching_graph,
-    preparation_graph=preparation_graph,
-)
-
-tools = create_supervisor_tools(handlers)
-supervisor = create_supervisor_agent(models.supervisor, tools)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_logging(settings.logging)
     await container.get(LLMConfigManager)
-    # Migrate DB here
-    yield
-    # Shutdown - wrap each cleanup in try-except to ensure all resources are released
+    await io_broker.startup()
     try:
-        await close_pdf_renderer()
-    except Exception as e:
-        logger.error(f"Error closing PDF renderer: {e}")
-
-    try:
-        await db.close()
-    except Exception as e:
-        logger.error(f"Error closing database: {e}")
-
-    try:
+        await laya_broker.startup()
+        try:
+            yield
+        finally:
+            await laya_broker.shutdown()
+    finally:
+        await io_broker.shutdown()
         await container.close()
-    except Exception as e:
-        logger.error(f"Error closing DI container: {e}")
 
 
 app = FastAPI(
@@ -87,16 +56,12 @@ setup_fastapi_dishka(
     container=container,
     app=app,
 )
-setup_taskiq_dishka(
-    container=container,
-    broker=broker,
-)
 
 
 # CORS middleware - origins configurable via CORS_ORIGINS env var
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.effective_cors_origins,
+    allow_origins=settings.app.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -105,11 +70,7 @@ app.add_middleware(
 # Include routers
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(config_router, prefix="/api/v1")
-app.include_router(resumes_router, prefix="/api/v1")
-app.include_router(jobs_router, prefix="/api/v1")
-app.include_router(enrichment_router, prefix="/api/v1")
-app.include_router(applications_router, prefix="/api/v1")
-app.include_router(resume_wizard_router, prefix="/api/v1")
+app.include_router(vacancy_router, prefix="/api/v1")
 
 
 @app.get("/")
@@ -126,7 +87,7 @@ def main():
     import uvicorn
 
     uvicorn.run(
-        "app.main:app",
+        "src.main:app",
         host=settings.app.host,
         port=settings.app.port,
         reload=settings.app.reload,

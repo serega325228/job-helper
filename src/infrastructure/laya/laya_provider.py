@@ -1,11 +1,13 @@
 import asyncio
+from functools import cached_property
 
 import laya
 
 
 class LayaProvider:
-    def __init__(self):
-        self._agent = laya.load("convaiinnovations/laya-multilingual")
+    @cached_property
+    def _agent(self):
+        return laya.load("convaiinnovations/laya-multilingual")
 
     async def evaluate(
         self,

@@ -75,6 +75,8 @@ class VacancyMatchRepository:
         title_weight: float = 0.4,
         candidate_limit: int = 100,
         per_preference_limit: int = 50,
+        vacancy_ids: list[UUID] | None = None,
+        preference_ids: list[UUID] | None = None,
     ) -> list[VacancyEmbeddingSearchResult]:
         if not 0 <= title_weight <= 1:
             raise ValueError("title_weight must be between zero and one")
@@ -100,6 +102,8 @@ class VacancyMatchRepository:
             Vacancy.title_embedding.is_not(None),
             Vacancy.content_embedding.is_not(None),
         ]
+        if vacancy_ids is not None:
+            vacancy_conditions.append(Vacancy.id.in_(vacancy_ids))
 
         title_candidates = (
             select(Vacancy.id.label("vacancy_id"))
@@ -149,6 +153,10 @@ class VacancyMatchRepository:
             )
             .cte("semantic_candidates")
         )
+        if preference_ids is not None:
+            semantic_candidates = semantic_candidates.element.where(
+                PreferenceIntent.id.in_(preference_ids),
+            ).cte("semantic_candidates")
         rank = (
             func.row_number()
             .over(

@@ -3,13 +3,14 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import ForeignKey, Index, UniqueConstraint
+from sqlalchemy import Computed, Enum, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import Boolean, DateTime, String, Text
 
 from src.infrastructure.models.base import Base
 from src.ports.embedder import EMBEDDING_DIMENSIONS
+from src.schemas.vacancy import BatchStatus, ProcessingStatus, VacancyStatus
 
 if TYPE_CHECKING:
     from src.infrastructure.models.vacancy_match import VacancyMatch
@@ -29,6 +30,19 @@ class Vacancy(Base):
     url: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
     company_name: Mapped[str | None] = mapped_column(String(500), index=True)
+    normalized_company: Mapped[str | None] = mapped_column(
+        Text,
+        Computed(
+            "lower(trim(regexp_replace(company_name, '\\s+', ' ', 'g')))",
+            persisted=True,
+        ),
+    )
+    normalized_title: Mapped[str] = mapped_column(
+        Text,
+        Computed(
+            "lower(trim(regexp_replace(title, '\\s+', ' ', 'g')))", persisted=True
+        ),
+    )
     description: Mapped[str] = mapped_column(Text, nullable=False)
 
     area_id: Mapped[str | None] = mapped_column(String(100), index=True)
@@ -62,12 +76,32 @@ class Vacancy(Base):
         Vector(EMBEDDING_DIMENSIONS),
     )
 
-    status: Mapped[str] = mapped_column(
-        String(30),
-        default="active",
+    status: Mapped[VacancyStatus] = mapped_column(
+        Enum(
+            VacancyStatus,
+            native_enum=False,
+            values_callable=lambda enum: [item.value for item in enum],
+        ),
+        default=VacancyStatus.ACTIVE,
         nullable=False,
         index=True,
     )
+    preview_id: Mapped[UUID | None] = mapped_column(ForeignKey("vacancy_previews.id"))
+    batch_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("vacancy_batches.id"), index=True
+    )
+    processing_status: Mapped[ProcessingStatus] = mapped_column(
+        Enum(
+            ProcessingStatus,
+            native_enum=False,
+            values_callable=lambda enum: [item.value for item in enum],
+        ),
+        default=ProcessingStatus.COMPLETED,
+        index=True,
+    )
+    raw_document: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    scores: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    evaluation: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         index=True,
@@ -96,6 +130,13 @@ class Vacancy(Base):
     )
 
     __table_args__ = (
+        Index(
+            "ix_vacancies_recent_reposts",
+            "normalized_company",
+            "normalized_title",
+            "discovered_at",
+        ),
+        Index("ix_vacancies_recovery", "processing_status", "updated_at"),
         UniqueConstraint(
             "source",
             "external_id",
@@ -119,3 +160,30 @@ class Vacancy(Base):
             postgresql_ops={"title_embedding": "vector_cosine_ops"},
         ),
     )
+
+
+class VacancyBatch(Base):
+    __tablename__ = "vacancy_batches"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    profile_id: Mapped[UUID] = mapped_column(ForeignKey("profiles.id"))
+    preference_ids: Mapped[list[str]] = mapped_column(JSONB)
+    hard_filters: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    search_limit: Mapped[int]
+    rerank_limit: Mapped[int]
+    title_weight: Mapped[float]
+    status: Mapped[BatchStatus] = mapped_column(
+        Enum(
+            BatchStatus,
+            native_enum=False,
+            values_callable=lambda enum: [item.value for item in enum],
+        ),
+        default=BatchStatus.DETAILS,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (Index("ix_vacancy_batches_recovery", "status", "updated_at"),)

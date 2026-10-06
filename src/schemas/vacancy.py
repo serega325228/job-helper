@@ -22,6 +22,45 @@ class EmploymentType(StrEnum):
     OTHER = "other"
 
 
+class PreviewStatus(StrEnum):
+    PENDING_FILTER = "pending_filter"
+    PENDING_LAYA = "pending_laya"
+    READY = "ready"
+    REJECTED = "rejected"
+    SELECTED = "selected"
+
+
+class VacancyStatus(StrEnum):
+    ACTIVE = "active"
+    REMOVED = "removed"
+    ARCHIVED = "archived"
+
+
+class ProcessingStatus(StrEnum):
+    PENDING_SCRAPE = "pending_scrape"
+    PENDING_PARSE = "pending_parse"
+    PENDING_EMBEDDING = "pending_embedding"
+    PENDING_RERANK = "pending_rerank"
+    PENDING_LAYA = "pending_laya"
+    PENDING_SAVE = "pending_save"
+    COMPLETED = "completed"
+    FILTERED = "filtered"
+    REMOVED = "removed"
+
+
+class CollectionStatus(StrEnum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+
+
+class BatchStatus(StrEnum):
+    DETAILS = "details"
+    PENDING_RERANK = "pending_rerank"
+    PENDING_LAYA = "pending_laya"
+    PENDING_SAVE = "pending_save"
+    COMPLETED = "completed"
+
+
 class VacancySearchQuery(BaseModel):
     text: str = Field(min_length=1)
     area_ids: list[str] = Field(default_factory=list)
@@ -43,7 +82,9 @@ class VacancyScrapingQuery(VacancySearchQuery):
 
 class VacancyHardFilters(BaseModel):
     sources: list[str] = Field(default_factory=list)
-    statuses: list[str] = Field(default_factory=lambda: ["active"])
+    statuses: list[VacancyStatus] = Field(
+        default_factory=lambda: [VacancyStatus.ACTIVE]
+    )
     area_ids: list[str] = Field(default_factory=list)
     countries: list[str] = Field(default_factory=list)
     cities: list[str] = Field(default_factory=list)
@@ -71,6 +112,7 @@ class VacancyReference(BaseModel):
 
 
 class VacancyPreview(VacancyReference):
+    model_config = ConfigDict(from_attributes=True)
     company_name: str | None = Field(default=None, max_length=500)
     location: str | None = None
     short_description: str | None = None
@@ -83,6 +125,39 @@ class VacancyPreview(VacancyReference):
     salary_to: int | None = Field(default=None, ge=0)
     salary_currency: str | None = None
     salary_gross: bool | None = None
+
+
+class PreviewCollectionRequest(BaseModel):
+    profile_id: UUID
+    sources: list[str] = Field(default_factory=lambda: ["all"], min_length=1)
+    preferences: list[str] = Field(default_factory=lambda: ["all"], min_length=1)
+    vacancy_page_urls: dict[str, HttpUrl] = Field(default_factory=dict)
+    query: VacancyScrapingQuery
+    hard_filters: VacancyHardFilters = Field(default_factory=VacancyHardFilters)
+
+
+class PreviewSelectionRequest(BaseModel):
+    profile_id: UUID
+    preview_ids: list[UUID] | None = None
+    hard_filters: VacancyHardFilters = Field(default_factory=VacancyHardFilters)
+    role_fit: list[str] = Field(default_factory=list)
+    skill_fit: list[str] = Field(default_factory=list)
+    limit: int = Field(default=50, ge=1, le=250)
+    search_limit: int = Field(default=100, ge=1)
+    rerank_limit: int = Field(default=40, ge=1)
+    title_weight: float = Field(default=0.4, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_fit_labels(self) -> Self:
+        if set(self.role_fit + self.skill_fit) - {"none", "weak", "good", "strong"}:
+            raise ValueError("Unknown Laya fit label")
+        return self
+
+
+class PreviewResponse(VacancyPreview):
+    id: UUID
+    status: PreviewStatus
+    evaluation: dict[str, Any] | None = None
 
 
 class VacancyScrapingResult(BaseModel):

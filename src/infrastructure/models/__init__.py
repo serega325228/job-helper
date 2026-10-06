@@ -3,15 +3,19 @@ from src.infrastructure.models.company import Company
 from src.infrastructure.models.preference_intent import PreferenceIntent
 from src.infrastructure.models.profile import Profile
 from src.infrastructure.models.resume import Resume
-from src.infrastructure.models.vacancy import Vacancy
+from src.infrastructure.models.vacancy import Vacancy, VacancyBatch
 from src.infrastructure.models.vacancy_match import VacancyMatch
+from src.infrastructure.models.vacancy_preview import PreviewCollection, VacancyPreview
 
 __all__ = [
     "Base",
     "Company",
     "PreferenceIntent",
+    "PreviewCollection",
     "Profile",
     "Resume",
     "Vacancy",
+    "VacancyBatch",
     "VacancyMatch",
+    "VacancyPreview",
 ]

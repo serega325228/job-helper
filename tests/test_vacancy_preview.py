@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from unittest.mock import Mock
 
 from src.exceptions.vacancy import VacancyPreviewEvaluationError
+from src.infrastructure.laya.laya_provider import LayaProvider
 from src.infrastructure.laya.questions import MATCH_QUESTIONS
 from src.infrastructure.models.preference_intent import PreferenceIntent
 from src.infrastructure.models.profile import Profile
@@ -54,7 +55,7 @@ def result(role="good", skill="weak") -> dict:
 
 class VacancyPreviewTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.laya = Mock()
+        self.laya = Mock(spec=LayaProvider)
         self.evaluator = VacancyPreviewEvaluator(self.laya)
         self.profile = Profile(
             skills=["Python"],
@@ -126,11 +127,15 @@ class VacancyPreviewTest(unittest.IsolatedAsyncioTestCase):
         )
         filters = {"published_after": datetime(2026, 9, 1, tzinfo=UTC)}
         self.assertFalse(
-            self.accept(preview(published_at=datetime(2026, 9, 15, tzinfo=UTC)), **filters)
+            self.accept(
+                preview(published_at=datetime(2026, 9, 15, tzinfo=UTC)), **filters
+            )
         )
         self.assertTrue(self.accept(preview(), **filters))
         self.assertTrue(
-            self.accept(preview(published_at=datetime(2026, 10, 2, tzinfo=UTC)), **filters)
+            self.accept(
+                preview(published_at=datetime(2026, 10, 2, tzinfo=UTC)), **filters
+            )
         )
 
     def test_only_explicit_experience_minimums_reject(self):
@@ -188,14 +193,17 @@ class VacancyPreviewTest(unittest.IsolatedAsyncioTestCase):
         calling_thread = threading.get_ident()
         evaluation_threads = []
 
-        def evaluate(states, questions, *, batch_size):
+        def evaluate(states, questions, *, batch_size, **kwargs):
             evaluation_threads.append(threading.get_ident())
             self.assertIs(questions, MATCH_QUESTIONS)
             self.assertEqual(batch_size, 2)
             self.assertEqual(states[0]["candidate"]["skills"], ["Python"])
             return [result("good", "weak"), result("weak", "strong")][: len(states)]
 
-        self.laya.evaluate_batch.side_effect = evaluate
+        provider = LayaProvider()
+        provider._agent = Mock()
+        provider._agent.predict_batch.side_effect = evaluate
+        self.evaluator = VacancyPreviewEvaluator(provider)
         vacancies = [preview(external_id=str(index)) for index in range(3)]
         accepted = await self.evaluator.evaluate(
             vacancies,
@@ -205,7 +213,7 @@ class VacancyPreviewTest(unittest.IsolatedAsyncioTestCase):
             batch_size=2,
         )
         self.assertEqual(accepted, [vacancies[0], vacancies[2]])
-        self.assertEqual(self.laya.evaluate_batch.call_count, 2)
+        self.assertEqual(provider._agent.predict_batch.call_count, 2)
         self.assertTrue(all(thread != calling_thread for thread in evaluation_threads))
 
     async def test_malformed_or_incomplete_evaluation_is_rejected(self):

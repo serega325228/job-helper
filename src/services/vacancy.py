@@ -1,12 +1,10 @@
 import asyncio
-import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
 from pydantic import ValidationError
 from structlog import get_logger
 
-from src.config.retry import RetryableLlmError, llm_retry
 from src.exceptions.vacancy import VacancyNormalizationError
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.models.vacancy import Vacancy
@@ -177,8 +175,8 @@ class VacancyService:
             return []
 
         try:
-            normalized = await self._normalize_with_retry(vacancies)
-        except (RetryableLlmError, ValidationError) as error:
+            normalized = await self._normalizer.normalize(vacancies)
+        except ValidationError as error:
             raise VacancyNormalizationError(
                 "Vacancy batch normalization failed",
             ) from error
@@ -187,18 +185,6 @@ class VacancyService:
             raw=vacancies,
             normalized=normalized,
         )
-
-    @llm_retry()
-    async def _normalize_with_retry(
-        self,
-        vacancies: list[RawVacancy],
-    ) -> list[NormalizedVacancy]:
-        try:
-            return await self._normalizer.normalize(vacancies)
-        except ValidationError:
-            raise
-        except TimeoutError as error:
-            raise RetryableLlmError("LLM timeout") from error
 
     @staticmethod
     def _validate_batch_consistency(
@@ -286,8 +272,8 @@ class VacancyService:
         raw: RawVacancy,
         normalized: NormalizedVacancy,
         seen_at: datetime,
-        content_embedding: list[float],
-        title_embedding: list[float],
+        content_embedding: list[float] | None = None,
+        title_embedding: list[float] | None = None,
     ) -> dict:
         soft_conditions = normalized.soft_conditions.model_dump(mode="json")
 

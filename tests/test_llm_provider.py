@@ -113,7 +113,7 @@ class LLMProviderTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(raised.exception.code, code)
 
     async def test_authentication_failure_is_not_retried_or_exposed(self):
-        provider = LLMProvider(LLMSettings(_env_file=None, max_retries=2), config())
+        provider = LLMProvider(LLMSettings(_env_file=None, max_retries=1), config())
         error = litellm.AuthenticationError(
             "secret-key", llm_provider="openai", model="custom"
         )

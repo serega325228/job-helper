@@ -45,6 +45,7 @@ class AppSettings(BaseSettings):
     port: int = Field(default=8000, ge=1, le=65_535)
     reload: bool = False
     data_dir: Path = Path(__file__).parent.parent.parent / "data"
+    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
 
 
 class DatabaseSettings(BaseSettings):
@@ -90,14 +91,16 @@ class EmbeddingSettings(BaseSettings):
 
     backend: Literal["local", "llama_server"] = "llama_server"
     base_url: HttpUrl = HttpUrl("http://localhost:8081")
-    server_model_name: str = Field(default="Qwen3-Embedding-0.6B-Q8_0.gguf", min_length=1)
+    server_model_name: str = Field(
+        default="Qwen3-Embedding-0.6B-Q8_0.gguf", min_length=1
+    )
     api_key: SecretStr | None = None
     request_timeout_seconds: float = Field(default=120.0, gt=0)
     batch_size: int = Field(default=16, ge=1)
     model_path: Path = (
         Path(__file__).parent.parent.parent
         / ".models"
-        #/ "embeddinggemma-300M-Q8_0.gguf"
+        # / "embeddinggemma-300M-Q8_0.gguf"
         / "Qwen3-Embedding-0.6B-Q8_0.gguf"
     )
 
@@ -122,7 +125,7 @@ class LLMSettings(BaseSettings):
     _config: LLMConfig | None = PrivateAttr(default=None)
 
     request_timeout_seconds: float = Field(default=60.0, gt=0)
-    max_retries: int = Field(default=2, ge=0)
+    max_retries: int = Field(default=1, ge=0, le=1)
 
     @property
     def config(self) -> LLMConfig | None:
@@ -131,6 +134,7 @@ class LLMSettings(BaseSettings):
     @config.setter
     def config(self, value: LLMConfig | None) -> None:
         self._config = value
+
 
 class TaskiqSettings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -146,6 +150,11 @@ class TaskiqSettings(BaseSettings):
 
     io_queue: str = "io"
     laya_queue: str = "laya"
+    stage_attempts: int = Field(default=3, ge=1)
+    retry_delay_seconds: float = Field(default=5, gt=0)
+    stale_timeout_seconds: int = Field(default=900, ge=60)
+    recovery_batch_size: int = Field(default=100, ge=1)
+    recovery_cron: str = "* * * * *"
 
 
 class RefinerSettings(BaseSettings):
@@ -183,7 +192,9 @@ class RerankerSettings(BaseSettings):
 
     backend: Literal["local", "llama_server"] = "llama_server"
     base_url: HttpUrl = HttpUrl("http://localhost:8082")
-    server_model_name: str = Field(default="Qwen3-Reranker-0.6B-Q8_0.gguf", min_length=1)
+    server_model_name: str = Field(
+        default="Qwen3-Reranker-0.6B-Q8_0.gguf", min_length=1
+    )
     api_key: SecretStr | None = None
     request_timeout_seconds: float = Field(default=120.0, gt=0)
     model_name: str = "BAAI/bge-reranker-v2-m3"
@@ -227,7 +238,7 @@ class CrawleeSettings(BaseSettings):
     desired_concurrency: int = Field(default=3, ge=1)
     max_concurrency: int = Field(default=5, ge=1)
     max_requests_per_minute: int = Field(default=30, ge=1)
-    max_request_retries: int = Field(default=2, ge=0)
+    max_request_retries: int = Field(default=1, ge=0, le=1)
     navigation_timeout_seconds: float = Field(default=30.0, gt=0)
     request_timeout_seconds: float = Field(default=300.0, gt=0)
     headless: bool = True
@@ -253,6 +264,8 @@ class ScrapingSettings(BaseSettings):
     max_previews: int = Field(default=250, ge=1)
     max_detail_pages: int = Field(default=50, ge=1)
     laya_batch_size: int = Field(default=32, ge=1)
+    normalization_batch_size: int = Field(default=5, ge=1)
+    preview_description_min_length: int = Field(default=80, ge=1)
 
 
 class LoggingSettings(BaseSettings):

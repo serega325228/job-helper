@@ -1,578 +1,399 @@
 import unittest
-from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from types import SimpleNamespace
-from typing import ClassVar
 from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 
-from crawlee.errors import UserHandlerTimeoutError
-from crawlee.router import Router
-from dishka import Provider, Scope, make_async_container
-from pydantic import ValidationError
+from sqlalchemy.dialects import postgresql
 
-from src.config.settings import CrawleeSettings, ScrapingSettings
+from src.config.settings import Settings
 from src.di.container import create_container
-from src.di.crawlee_provider import CrawleeProvider
-from src.di.providers import (
-    ConfigProvider,
-    InfrastructureProvider,
-    RepositoryProvider,
-    ServiceProvider,
-)
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
-from src.schemas.vacancy import RawVacancy, VacancyPreview, VacancyScrapingQuery
-from src.services.vacancy import VacancyService
-from src.services.vacancy_preview import VacancyPreviewEvaluator
-from src.services.vacancy_scraping import (
-    CrawlerFactory,
-    UnitOfWorkFactory,
-    VacancyScrapingService,
-    VacancyServiceFactory,
+from src.infrastructure.models.vacancy import Vacancy, VacancyBatch
+from src.infrastructure.models.vacancy_preview import PreviewCollection
+from src.infrastructure.vacancy_sources.hh.source import HhVacancySource
+from src.infrastructure.vacancy_sources.linkedin.source import LinkedInVacancySource
+from src.repositories.vacancy_preview import VacancyPreviewRepository
+from src.schemas.scoring import (
+    LayaComparison,
+    PreferenceComparison,
+    ProfileComparison,
+    VacancyRerankScores,
 )
+from src.schemas.vacancy import (
+    BatchStatus,
+    CollectionStatus,
+    NormalizedVacancy,
+    PreviewStatus,
+    ProcessingStatus,
+    RawVacancy,
+    VacancyPreview,
+)
+from src.schemas.vacancy_match import VacancyEmbeddingSearchResult
+from src.services.scoring import ScoringService
+from src.services.vacancy import VacancyService
+from src.services.vacancy_match import VacancyMatchService
+from src.services.vacancy_scraping import PreviewServiceFactory, VacancyScrapingService
+from src.tasks import scraping as tasks
 
 
-def preview(external_id, *, title="Python Developer", url=None):
-    return VacancyPreview(
-        source="test",
-        external_id=external_id,
-        title=title,
-        url=url or f"https://jobs.example/vacancies/{external_id}",
+async def run_task(task, *args, dependencies):
+    container = SimpleNamespace(
+        get=AsyncMock(
+            side_effect=lambda dependency, component="": dependencies[dependency]
+        )
     )
+    await task.original_func(*args, dishka_container=container)
 
 
-class FakeCrawler:
-    instances: ClassVar[list[FakeCrawler]] = []
-    statuses: ClassVar[dict[str, int]] = {}
-
-    def __init__(self, **options):
-        self.options = options
-        self.router = Router()
-        self.requests = []
-        self.attempts = Counter()
-        self.known = set()
-        self.pending = []
-        self.failed_handler = None
-        self.queue = SimpleNamespace(drop=AsyncMock())
-        self.store = SimpleNamespace(drop=AsyncMock())
-        self.instances.append(self)
-
-    def failed_request_handler(self, handler):
-        self.failed_handler = handler
-        return handler
-
-    async def add_requests(self, requests):
-        for request in requests:
-            if request.unique_key not in self.known:
-                self.known.add(request.unique_key)
-                self.requests.append(request)
-                self.pending.append(request)
-
-    async def run(self, requests):
-        await self.add_requests(requests)
-        handled = 0
-        while self.pending and handled < self.options["max_requests_per_crawl"]:
-            request = self.pending.pop(0)
-            while True:
-                deferred = []
-
-                async def add_deferred(requests, destination=deferred):
-                    destination.extend(requests)
-
-                self.attempts[request.url] += 1
-                context = SimpleNamespace(
-                    request=request,
-                    page=SimpleNamespace(index=0),
-                    response=SimpleNamespace(
-                        status=self.statuses.get(request.url, 200)
-                    ),
-                    add_requests=add_deferred,
-                )
-                try:
-                    await self.router(context)
-                except (RuntimeError, UserHandlerTimeoutError) as error:
-                    if request.retry_count < self.options["max_request_retries"]:
-                        request.retry_count += 1
-                        continue
-                    await self.failed_handler(context, error)
-                else:
-                    await self.add_requests(deferred)
-                break
-            handled += 1
-
-    async def get_request_manager(self):
-        return self.queue
-
-    async def get_key_value_store(self):
-        return self.store
-
-
-class FakeSource:
-    source_name = "test"
-
-    def __init__(self, pages, *, advance_failures=0, wrong_identity=False):
-        self.pages = pages
-        self.advance_failures = advance_failures
-        self.wrong_identity = wrong_identity
-        self.details = []
-        self.filters_applied = 0
-
-    def search_url(self, query, filters):
-        return "https://jobs.example/search"
-
-    async def apply_filters(self, page, query, filters):
-        self.filters_applied += 1
-
-    async def parse_previews(self, page):
-        return self.pages[page.index]
-
-    async def advance_search(self, page):
-        if self.advance_failures:
-            self.advance_failures -= 1
-            raise TimeoutError("Pagination timed out")
-        page.index += 1
-        return page.index < len(self.pages)
-
-    async def parse_vacancy(self, page, item):
-        self.details.append(item.external_id)
-        return RawVacancy(
-            source=item.source,
-            external_id="unexpected" if self.wrong_identity else item.external_id,
-            url=item.url,
-            title=item.title,
-            raw_text="Build Python services",
-            fetched_at=datetime.now(UTC),
-        )
-
-
-class FakeEvaluator:
-    def __init__(self, selected=None):
-        self.selected = selected
-        self.batches = []
-
-    def accept(self, item, profile, preferences, filters, query):
-        return item.title != "Designer"
-
-    async def evaluate(self, items, profile, preferences, query, *, batch_size):
-        self.batches.append([item.external_id for item in items])
-        return [
-            item
-            for item in items
-            if self.selected is None or item.external_id in self.selected
-        ]
-
-
-class FakeUnitOfWork:
-    def __init__(self, container):
-        self.profiles = SimpleNamespace(
-            get_by_id=AsyncMock(return_value=container.profile),
-            get_preferences_by_profile_id=AsyncMock(return_value=[]),
-        )
-        self.vacancies = SimpleNamespace(
-            get_by_external_keys=AsyncMock(side_effect=container.existing)
-        )
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        return None
-
-
-class FakeDependencies:
-    def __init__(self):
-        self.profile = SimpleNamespace(id=uuid4())
-        self.items = []
-        self.scopes = []
-        self.normalization_failures = 0
-
-    @asynccontextmanager
-    async def unit_of_work(self):
-        scope = SimpleNamespace(uow=FakeUnitOfWork(self), service=None)
-        self.scopes.append(scope)
-        yield scope.uow
-
-    @asynccontextmanager
-    async def vacancy_service(self):
-        scope = SimpleNamespace(
-            uow=FakeUnitOfWork(self),
-            service=SimpleNamespace(
-                normalize_vacancies=AsyncMock(side_effect=self.normalize),
-                save_vacancies=AsyncMock(side_effect=self.save),
-            ),
-        )
-        self.scopes.append(scope)
-        yield scope.service
-
-    async def existing(self, keys, *, urls):
-        return [
-            item
-            for item in self.items
-            if (item.source, item.external_id) in keys or item.url in urls
-        ]
-
-    async def normalize(self, raw):
-        if self.normalization_failures:
-            self.normalization_failures -= 1
-            raise RuntimeError("Temporary normalization failure")
-        return raw
-
-    async def save(self, raw, normalized):
-        saved = [
-            SimpleNamespace(
-                id=uuid4(),
-                source=item.source,
-                external_id=item.external_id,
-                url=str(item.url),
-            )
-            for item in raw
-        ]
-        self.items.extend(saved)
-        return saved
-
-
-class VacancyScrapingTests(unittest.IsolatedAsyncioTestCase):
+class VacancyPipelineTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        FakeCrawler.instances = []
-        FakeCrawler.statuses = {}
-        self.dependencies = FakeDependencies()
-        self.evaluator = FakeEvaluator()
-        self.settings = ScrapingSettings(_env_file=None)
-        self.crawlee_settings = CrawleeSettings(_env_file=None)
-        self.crawler_patch = patch(
-            "src.di.crawlee_provider.PlaywrightCrawler", FakeCrawler
-        )
-        self.crawler_patch.start()
-        self.addCleanup(self.crawler_patch.stop)
-        self.logger = Mock()
-        logger_patch = patch("src.services.vacancy_scraping.logger", self.logger)
-        logger_patch.start()
-        self.addCleanup(logger_patch.stop)
+        self.uow = AsyncMock()
+        self.uow.__aenter__.return_value = self.uow
+        self.settings = Settings(_env_file=None)
+        self.dependencies = {SqlAlchemyUnitOfWork: self.uow, Settings: self.settings}
+        self.queues = {}
+        for task in (
+            tasks.collect_previews,
+            tasks.filter_previews,
+            tasks.evaluate_previews,
+            tasks.scrape_details,
+            tasks.parse_vacancies,
+            tasks.score_embeddings,
+            tasks.rerank_vacancies,
+            tasks.evaluate_vacancies,
+            tasks.save_vacancy_scores,
+        ):
+            mock = AsyncMock()
+            self.queues[task.task_name] = mock
+            patcher = patch.object(task, "kiq", mock)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
-    async def scrape(self, source):
-        configuration = Provider()
-        configuration.provide(
-            lambda: self.crawlee_settings, provides=CrawleeSettings, scope=Scope.APP
+    async def test_collection_commits_previews_before_scheduling_and_skips_replay(self):
+        collection = PreviewCollection(
+            id=uuid4(),
+            source="linkedin",
+            status=CollectionStatus.PENDING,
+            vacancy_page_url="https://www.linkedin.com/jobs/search/",
+            query={"text": "Python"},
+            hard_filters={},
         )
-        configuration.provide(
-            lambda: self.settings, provides=ScrapingSettings, scope=Scope.APP
-        )
-        async with make_async_container(configuration, CrawleeProvider()) as container:
-            service = VacancyScrapingService(
-                await container.get(CrawlerFactory),
-                self.dependencies.unit_of_work,
-                self.dependencies.vacancy_service,
-                self.evaluator,
-                max_search_pages=self.settings.max_search_pages,
-                max_previews=self.settings.max_previews,
-                max_detail_pages=self.settings.max_detail_pages,
-                laya_batch_size=self.settings.laya_batch_size,
-            )
-            return await service.scrape(
-                source,
-                VacancyScrapingQuery(text="Python"),
-                self.dependencies.profile.id,
-            )
+        self.uow.previews.get_collection.return_value = collection
+        events = []
+        preview_id = uuid4()
 
-    async def test_only_filtered_laya_matches_reach_details_and_storage(self):
-        self.dependencies.items = [
-            SimpleNamespace(
-                source="test", external_id="known", url="https://jobs.example/old"
-            ),
-            SimpleNamespace(
-                source="other", external_id="stored", url="https://jobs.example/stored"
-            ),
-        ]
-        match = preview("match")
-        self.evaluator.selected = {"match"}
-        source = FakeSource(
-            [
+        async def persist(collection_id, previews):
+            events.append("persist")
+            return {
+                PreviewStatus.PENDING_FILTER: [preview_id],
+                PreviewStatus.PENDING_LAYA: [],
+            }
+
+        @asynccontextmanager
+        async def factory():
+            yield SimpleNamespace(save_scraped=persist)
+
+        async def scrape(source, url, query, filters, save_batch):
+            await save_batch(
                 [
-                    preview("known"),
-                    preview("alias", url="https://jobs.example/stored"),
-                    preview("designer", title="Designer"),
-                    preview("weak"),
-                    match,
-                    match,
-                    preview("same-url", url=str(match.url)),
+                    VacancyPreview(
+                        source="linkedin",
+                        external_id="42",
+                        title="Python",
+                        url="https://www.linkedin.com/jobs/view/42/",
+                    )
                 ]
-            ]
-        )
+            )
 
-        result = await self.scrape(source)
-
-        self.assertEqual(self.evaluator.batches, [["weak", "match"]])
-        self.assertEqual(source.details, ["match"])
-        self.assertEqual(result.previews_discovered, 5)
-        self.assertEqual(result.duplicates_skipped, 4)
-        self.assertEqual(result.rejected_by_filters, 1)
-        self.assertEqual(result.sent_to_laya, 2)
-        self.assertEqual(result.rejected_by_laya, 1)
-        self.assertEqual(result.vacancies_saved, 1)
-        detail = next(
-            request
-            for request in FakeCrawler.instances[0].requests
-            if request.label == "DETAIL"
+        self.dependencies.update(
+            {
+                PreviewServiceFactory: factory,
+                VacancyScrapingService: SimpleNamespace(
+                    scrape_previews=AsyncMock(side_effect=scrape)
+                ),
+                HhVacancySource: object(),
+                LinkedInVacancySource: object(),
+            }
         )
-        self.assertEqual(
-            VacancyPreview.model_validate(detail.user_data["preview"]), match
+        self.queues[tasks.filter_previews.task_name].side_effect = lambda *args: (
+            events.append("enqueue")
         )
+        await run_task(
+            tasks.collect_previews, collection.id, dependencies=self.dependencies
+        )
+        await run_task(
+            tasks.collect_previews, collection.id, dependencies=self.dependencies
+        )
+        self.assertEqual(events, ["persist", "enqueue"])
+        self.assertEqual(collection.status, CollectionStatus.COMPLETED)
+        self.dependencies[VacancyScrapingService].scrape_previews.assert_awaited_once()
 
-    async def test_search_retry_preserves_accepted_previews_without_repeating_evaluation(
+    async def test_detailed_stages_reload_shortlist_rerank_evaluate_and_skip_replays(
         self,
     ):
-        source = FakeSource(
-            [[preview("first")], [preview("second")]], advance_failures=1
+        preference_id = uuid4()
+        batch = VacancyBatch(
+            id=uuid4(),
+            profile_id=uuid4(),
+            preference_ids=[str(preference_id)],
+            hard_filters={},
+            status=BatchStatus.DETAILS,
+            search_limit=100,
+            rerank_limit=1,
+            title_weight=0.4,
         )
-
-        result = await self.scrape(source)
-
-        self.assertEqual(source.details, ["first", "second"])
-        self.assertEqual(self.evaluator.batches, [["first"], ["second"]])
-        self.assertEqual(result.search_pages, 2)
-        self.assertEqual(result.previews_discovered, 2)
-        self.assertEqual(result.vacancies_saved, 2)
-        self.assertEqual(result.failed_pages, 0)
-
-    async def test_terminal_search_failure_salvages_accepted_batch(self):
-        source = FakeSource([[preview("first")], []], advance_failures=10)
-
-        result = await self.scrape(source)
-        self.logger.error.assert_called_once()
-
-        self.assertEqual(source.details, ["first"])
-        self.assertEqual(self.evaluator.batches, [["first"]])
-        self.assertEqual(result.failed_pages, 1)
-        self.assertEqual(result.vacancies_saved, 1)
-
-    async def test_detail_retry_uses_fresh_scopes_and_does_not_double_count_scraped_page(
-        self,
-    ):
-        self.dependencies.normalization_failures = 1
-        source = FakeSource([[preview("first"), preview("second")]])
-
-        result = await self.scrape(source)
-
-        service_scopes = [
-            scope
-            for scope in self.dependencies.scopes
-            if scope.service is not None
-            and scope.service.normalize_vacancies.await_count
+        vacancies = [
+            Vacancy(
+                id=uuid4(),
+                batch_id=batch.id,
+                preview_id=uuid4(),
+                source="hh",
+                external_id=str(index),
+                url=f"https://hh.ru/vacancy/{index}",
+                title="Python Developer",
+                company_name="Example",
+                description="",
+                processing_status=ProcessingStatus.PENDING_SCRAPE,
+            )
+            for index in range(2)
         ]
-        self.assertEqual(len(service_scopes), 3)
-        self.assertEqual(
-            len({id(scope.uow) for scope in self.dependencies.scopes}),
-            len(self.dependencies.scopes),
-        )
-        self.assertEqual(source.details, ["first", "first", "second"])
-        self.assertEqual(result.detail_pages_scraped, 2)
-        self.assertEqual(result.vacancies_saved, 2)
-
-    async def test_terminal_detail_failure_does_not_stop_other_details(self):
-        self.crawlee_settings = self.crawlee_settings.model_copy(
-            update={"max_request_retries": 0}
-        )
-        self.dependencies.normalization_failures = 1
-        source = FakeSource([[preview("first"), preview("second")]])
-
-        result = await self.scrape(source)
-        self.logger.error.assert_called_once()
-
-        self.assertEqual(result.failed_pages, 1)
-        self.assertEqual(result.vacancies_saved, 1)
-        self.assertEqual(self.dependencies.items[0].external_id, "second")
-
-    async def test_removed_details_are_not_parsed_or_retried(self):
-        removed = [preview("404"), preview("410")]
-        FakeCrawler.statuses = {
-            str(item.url): int(item.external_id) for item in removed
+        raw = {
+            (vacancy.source, vacancy.external_id): RawVacancy(
+                source=vacancy.source,
+                external_id=vacancy.external_id,
+                url=vacancy.url,
+                title=vacancy.title,
+                raw_text="Full description with Python requirements",
+                fetched_at=datetime.now(UTC),
+            )
+            for vacancy in vacancies
         }
-
-        result = await self.scrape(FakeSource([removed]))
-
-        self.assertEqual(result.removed_pages, 2)
-        self.assertEqual(result.detail_pages_scraped, 0)
-        self.assertEqual(result.vacancies_saved, 0)
-        self.assertEqual(result.failed_pages, 0)
-        self.assertTrue(
-            all(amount == 1 for amount in FakeCrawler.instances[0].attempts.values())
-        )
-
-    async def test_detail_with_changed_identity_is_rejected(self):
-        self.crawlee_settings = self.crawlee_settings.model_copy(
-            update={"max_request_retries": 0}
-        )
-
-        result = await self.scrape(
-            FakeSource([[preview("first")]], wrong_identity=True)
-        )
-        self.logger.error.assert_called_once()
-
-        self.assertEqual(result.failed_pages, 1)
-        self.assertEqual(result.vacancies_saved, 0)
-        self.assertEqual(self.dependencies.items, [])
-
-    async def test_page_preview_and_detail_limits_stop_discovery(self):
-        for limits, expected_details, expected_pages, expected_previews in [
-            ({"max_search_pages": 1}, 2, 1, 2),
-            ({"max_previews": 3}, 3, 2, 3),
-            ({"max_detail_pages": 1}, 1, 1, 2),
-        ]:
-            with self.subTest(limits=limits):
-                self.dependencies = FakeDependencies()
-                self.evaluator = FakeEvaluator()
-                self.settings = ScrapingSettings(_env_file=None, **limits)
-                source = FakeSource(
-                    [
-                        [preview("1"), preview("2")],
-                        [preview("3"), preview("4")],
-                        [preview("5")],
-                    ]
-                )
-                result = await self.scrape(source)
-                self.assertEqual(len(source.details), expected_details)
-                self.assertEqual(result.search_pages, expected_pages)
-                self.assertEqual(result.previews_discovered, expected_previews)
-
-    async def test_runs_have_isolated_storage_counters_and_crawlee_configuration(self):
-        first = await self.scrape(FakeSource([[preview("first")]]))
-        second = await self.scrape(FakeSource([[preview("first")]]))
-        options = FakeCrawler.instances[0].options
-
-        self.assertEqual(first.vacancies_saved, 1)
-        self.assertEqual(second.vacancies_saved, 0)
-        self.assertEqual(second.duplicates_skipped, 1)
-        self.assertEqual(second.detail_pages_enqueued, 0)
-        directories = [
-            crawler.options["configuration"].storage_dir
-            for crawler in FakeCrawler.instances
+        previews = [
+            SimpleNamespace(
+                id=vacancy.preview_id,
+                **VacancyPreview(
+                    source=vacancy.source,
+                    external_id=vacancy.external_id,
+                    title=vacancy.title,
+                    url=vacancy.url,
+                ).model_dump(),
+                evaluation={"role_fit": "strong", "skill_fit": "strong"},
+            )
+            for vacancy in vacancies
         ]
-        self.assertEqual(len(set(directories)), 2)
-        self.assertTrue(all(not Path(directory).exists() for directory in directories))
-        for crawler in FakeCrawler.instances:
-            crawler.queue.drop.assert_awaited_once()
-            crawler.store.drop.assert_awaited_once()
-        self.assertFalse(options["configure_logging"])
-        self.assertFalse(options["retry_on_blocked"])
-        self.assertEqual(
-            options["max_request_retries"], self.crawlee_settings.max_request_retries
+        self.uow.previews.get_by_ids.return_value = previews
+        self.uow.vacancies.get_stage.side_effect = lambda ids, status: [
+            vacancy
+            for vacancy in vacancies
+            if vacancy.id in ids and vacancy.processing_status == status
+        ]
+        self.uow.vacancies.get_batch.return_value = batch
+        self.uow.vacancies.get_batch_vacancies.return_value = vacancies
+        self.uow.profiles.get_by_id.return_value = SimpleNamespace(id=batch.profile_id)
+        self.uow.profiles.get_preferences_by_ids.return_value = [
+            SimpleNamespace(
+                id=preference_id,
+                enabled=True,
+                title_embedding=None,
+                content_embedding=None,
+            )
+        ]
+        self.uow.vacancy_matches.get_by_profile_and_vacancy_ids.return_value = []
+        self.uow.vacancy_matches.add = Mock()
+        self.uow.vacancy_matches.search_by_preferences.return_value = [
+            VacancyEmbeddingSearchResult(
+                vacancy_id=vacancy.id,
+                preference_id=preference_id,
+                title_similarity=0.9,
+                content_similarity=0.8,
+                combined_similarity=0.86 - index * 0.1,
+            )
+            for index, vacancy in enumerate(vacancies)
+        ]
+        normalizer = SimpleNamespace(
+            normalize=AsyncMock(
+                side_effect=lambda items: [
+                    NormalizedVacancy(
+                        source=item.source,
+                        external_id=item.external_id,
+                        title=item.title,
+                        description=item.raw_text,
+                    )
+                    for item in items
+                ]
+            )
         )
-        self.assertEqual(options["max_session_rotations"], 0)
-        self.assertEqual(options["ignore_http_error_status_codes"], [404, 410])
-        self.assertEqual(
-            options["navigation_timeout"],
-            timedelta(seconds=self.crawlee_settings.navigation_timeout_seconds),
+        service = VacancyService(
+            self.uow,
+            normalizer,
+            SimpleNamespace(embed=AsyncMock(return_value=[[1.0, 0.0]] * 4)),
         )
-        self.assertEqual(
-            options["concurrency_settings"].max_tasks_per_minute,
-            self.crawlee_settings.max_requests_per_minute,
-        )
-        self.assertEqual(
-            options["concurrency_settings"].max_concurrency,
-            self.crawlee_settings.max_concurrency,
-        )
-        self.assertEqual(options["goto_options"], {"wait_until": "domcontentloaded"})
+        events = []
 
-    async def test_dependency_graph_validates_without_initializing_models(self):
+        async def rerank(profile, items, preferences):
+            events.append("rerank")
+            self.assertEqual(items, [vacancies[0]])
+            return {
+                vacancies[0].id: VacancyRerankScores(
+                    profile_score=0.9, preference_score=0.8
+                )
+            }
+
+        async def evaluate(profile, preferences, items, **kwargs):
+            events.append("laya")
+            self.assertEqual(
+                items[vacancies[0].id].description, raw[("hh", "0")].raw_text
+            )
+            return {
+                vacancy.id: LayaComparison(role_fit="good", skill_fit="weak")
+                for vacancy in vacancies
+            }
+
+        scoring = Mock(spec=ScoringService)
+        scoring.compare_profile.return_value = ProfileComparison(score=0.8)
+        scoring.compare_preference.return_value = PreferenceComparison(
+            score=0.8, hard_constraints_passed=True
+        )
+        scoring.rerank_vacancies.side_effect = rerank
+        scoring.laya_match_vacancies.side_effect = evaluate
+        self.dependencies.update(
+            {
+                VacancyService: service,
+                ScoringService: scoring,
+                VacancyMatchService: VacancyMatchService(self.uow, scoring),
+                VacancyScrapingService: SimpleNamespace(
+                    scrape_details=AsyncMock(return_value=raw)
+                ),
+                HhVacancySource: object(),
+                LinkedInVacancySource: object(),
+            }
+        )
+        ids = [vacancy.id for vacancy in vacancies]
+        for task, arguments, expected in (
+            (tasks.scrape_details, [ids], ProcessingStatus.PENDING_PARSE),
+            (tasks.parse_vacancies, [ids], ProcessingStatus.PENDING_EMBEDDING),
+            (tasks.score_embeddings, [batch.id], ProcessingStatus.PENDING_RERANK),
+            (tasks.rerank_vacancies, [batch.id], ProcessingStatus.PENDING_LAYA),
+            (tasks.evaluate_vacancies, [batch.id], ProcessingStatus.PENDING_SAVE),
+            (tasks.save_vacancy_scores, [batch.id], ProcessingStatus.COMPLETED),
+        ):
+            await run_task(task, *arguments, dependencies=self.dependencies)
+            self.assertEqual(vacancies[0].processing_status, expected)
+            await run_task(task, *arguments, dependencies=self.dependencies)
+        self.assertEqual(events, ["rerank", "laya"])
+        self.assertEqual(vacancies[1].processing_status, ProcessingStatus.FILTERED)
+        self.assertEqual(
+            vacancies[1].evaluation, {"role_fit": "good", "skill_fit": "weak"}
+        )
+        self.assertEqual(
+            vacancies[0].evaluation, {"role_fit": "good", "skill_fit": "weak"}
+        )
+        self.assertEqual(batch.status, BatchStatus.COMPLETED)
+        self.uow.vacancy_matches.add.assert_called_once()
+        self.assertIn("total_score", vacancies[0].scores)
+        self.assertEqual(
+            self.uow.vacancy_matches.search_by_preferences.await_args.kwargs[
+                "vacancy_ids"
+            ],
+            ids,
+        )
+
+    async def test_embedding_waits_for_the_whole_persisted_batch(self):
+        batch = SimpleNamespace(id=uuid4(), status=BatchStatus.DETAILS)
+        self.uow.vacancies.get_batch.return_value = batch
+        self.uow.vacancies.get_batch_vacancies.return_value = [
+            SimpleNamespace(processing_status=ProcessingStatus.PENDING_PARSE)
+        ]
+        self.dependencies.update({VacancyService: Mock(), ScoringService: Mock()})
+        await run_task(tasks.score_embeddings, batch.id, dependencies=self.dependencies)
+        self.uow.profiles.get_by_id.assert_not_awaited()
+        self.queues[tasks.rerank_vacancies.task_name].assert_not_awaited()
+
+    async def test_recovery_reschedules_stale_rows_once_per_timeout(self):
+        old = datetime.now(UTC) - timedelta(hours=1)
+        preview = SimpleNamespace(
+            id=uuid4(), status=PreviewStatus.PENDING_LAYA, updated_at=old
+        )
+        batch = SimpleNamespace(
+            id=uuid4(), status=BatchStatus.PENDING_SAVE, updated_at=old
+        )
+        self.uow.previews.stale_collections.return_value = []
+        self.uow.vacancies.stale_vacancies.return_value = []
+        self.uow.previews.stale_previews.side_effect = lambda cutoff, limit: (
+            [preview] if preview.updated_at < cutoff else []
+        )
+        self.uow.vacancies.stale_batches.side_effect = lambda cutoff, limit: (
+            [batch] if batch.updated_at < cutoff else []
+        )
+        await run_task(tasks.reconcile_processing, dependencies=self.dependencies)
+        await run_task(tasks.reconcile_processing, dependencies=self.dependencies)
+        self.queues[tasks.evaluate_previews.task_name].assert_awaited_once_with(
+            [preview.id]
+        )
+        self.queues[tasks.save_vacancy_scores.task_name].assert_awaited_once_with(
+            batch.id
+        )
+
+    async def test_duplicate_detection_rejects_exact_and_recent_reposts_but_allows_old_reposts(
+        self,
+    ):
+        session = AsyncMock()
+        now = datetime.now(UTC)
+        stored = [
+            ("hh", "exact", "old company", "python", now - timedelta(days=8)),
+            ("hh", "recent", "example", "python developer", now - timedelta(days=1)),
+        ]
+
+        async def execute(statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            return stored if "FROM vacancy_previews" in sql else []
+
+        session.execute.side_effect = execute
+        session.scalars.return_value = []
+        repository = VacancyPreviewRepository(session)
+        previews = [
+            VacancyPreview(
+                source="hh",
+                external_id=external_id,
+                title=title,
+                company_name=company,
+                url=f"https://hh.ru/vacancy/{external_id}",
+            )
+            for external_id, title, company in (
+                ("exact", "Unrelated", "Elsewhere"),
+                ("repost", " PYTHON   Developer ", " Example "),
+                ("old-repost", "Python", "Old Company"),
+            )
+        ]
+        await repository.save_new(uuid4(), previews, description_min_length=80)
+        params = (
+            session.scalars.await_args.args[0]
+            .compile(dialect=postgresql.dialect())
+            .params
+        )
+        self.assertEqual(params["external_id_m0"], "old-repost")
+        self.assertNotIn("external_id_m1", params)
+
+    async def test_workers_use_separate_queues_acknowledgement_and_valid_dependencies(
+        self,
+    ):
+        for task in tasks.io_broker.get_all_tasks().values():
+            self.assertEqual(task.labels["ack_type"], "when_executed")
+        self.assertEqual(
+            set(tasks.laya_broker.get_all_tasks()),
+            {tasks.evaluate_previews.task_name, tasks.evaluate_vacancies.task_name},
+        )
+        self.assertEqual(
+            tasks.io_broker._task_queues[0].routing_key, self.settings.taskiq.io_queue
+        )
+        self.assertEqual(
+            tasks.laya_broker._task_queues[0].routing_key,
+            self.settings.taskiq.laya_queue,
+        )
         container = create_container()
         await container.close()
-
-    async def test_crawlee_provider_cleans_up_when_a_run_raises(self):
-        with (
-            patch.object(
-                FakeCrawler,
-                "run",
-                AsyncMock(side_effect=RuntimeError("startup failed")),
-            ),
-            self.assertRaisesRegex(RuntimeError, "startup failed"),
-        ):
-            await self.scrape(FakeSource([[preview("first")]]))
-        crawler = FakeCrawler.instances[-1]
-        crawler.queue.drop.assert_awaited_once()
-        crawler.store.drop.assert_awaited_once()
-        self.assertFalse(Path(crawler.options["configuration"].storage_dir).exists())
-
-    def test_invalid_scraping_limits_and_concurrency_fail_fast(self):
-        for values in [
-            {"max_previews": 0},
-            {"max_search_pages": 0},
-            {"max_detail_pages": 0},
-            {"laya_batch_size": 0},
-        ]:
-            with self.subTest(values=values), self.assertRaises(ValidationError):
-                ScrapingSettings(_env_file=None, **values)
-        for values in [
-            {"min_concurrency": 4},
-            {"desired_concurrency": 6},
-            {"max_requests_per_minute": 0},
-            {"max_request_retries": -1},
-        ]:
-            with self.subTest(values=values), self.assertRaises(ValidationError):
-                CrawleeSettings(_env_file=None, **values)
-
-    async def test_scoped_dependencies_are_created_and_closed_by_providers(self):
-        overrides = Provider()
-        closed = []
-
-        async def unit_of_work():
-            dependency = FakeUnitOfWork(self.dependencies)
-            try:
-                yield dependency
-            finally:
-                closed.append(dependency)
-
-        async def vacancy_service():
-            dependency = SimpleNamespace(
-                normalize_vacancies=AsyncMock(side_effect=self.dependencies.normalize),
-                save_vacancies=AsyncMock(side_effect=self.dependencies.save),
-            )
-            try:
-                yield dependency
-            finally:
-                closed.append(dependency)
-
-        overrides.provide(
-            unit_of_work,
-            provides=SqlAlchemyUnitOfWork,
-            scope=Scope.REQUEST,
-            override=True,
-        )
-        overrides.provide(
-            vacancy_service, provides=VacancyService, scope=Scope.REQUEST, override=True
-        )
-        overrides.provide(
-            lambda: self.evaluator,
-            provides=VacancyPreviewEvaluator,
-            scope=Scope.APP,
-            override=True,
-        )
-        async with make_async_container(
-            ConfigProvider(),
-            CrawleeProvider(),
-            InfrastructureProvider(),
-            RepositoryProvider(),
-            ServiceProvider(),
-            overrides,
-        ) as container:
-            for dependency_type in (UnitOfWorkFactory, VacancyServiceFactory):
-                factory = await container.get(dependency_type)
-                async with factory() as first:
-                    async with factory() as second:
-                        self.assertIsNot(first, second)
-                        self.assertNotIn(first, closed)
-                        self.assertNotIn(second, closed)
-                    self.assertIn(second, closed)
-                    self.assertNotIn(first, closed)
-                self.assertIn(first, closed)
-            service = await container.get(VacancyScrapingService)
-            result = await service.scrape(
-                FakeSource([[preview("provider")]]),
-                VacancyScrapingQuery(text="Python"),
-                self.dependencies.profile.id,
-            )
-            self.assertEqual(result.vacancies_saved, 1)
 
 
 if __name__ == "__main__":

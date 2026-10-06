@@ -98,17 +98,22 @@ of proficiency; metric warnings and edit review still matter.
 
 ## Vacancy matching
 
-The matching graph searches by preferences, compares and reranks candidates, then
-saves matches. Comparison and reranking share one load of the profile, vacancies,
-and preferences. Hard constraints are checked before profile scoring or model
-inference; only the top `rerank_limit` candidates reach the reranker.
+Vacancy processing uses Taskiq and RabbitMQ. The collection and matching
+LangGraph workflows have been removed; resume and supervisor agents remain separate.
 
-Laya evaluates role and skill fit for each vacancy's selected preference. Its
-`none`, `weak`, `good`, and `strong` labels map to `0`, `1/3`, `2/3`, and `1`.
-Each fit contributes 10% to both the shortlist and final geometric scores. A zero
-component makes the combined score zero. These ordinal values are uncalibrated;
-calibration requires labeled matches. Labels and numeric scores are saved in
-`component_scores.laya` with matcher version `structured-laya-rerank-v1`.
+Detailed processing persists raw details, normalizes them, creates embeddings,
+and selects the existing top `rerank_limit` candidates (40 by default, with
+`search_limit=100`). There was no percentage setting in the previous matcher.
+Only that shortlist is reranked. Every successfully parsed vacancy receives a new
+Laya evaluation using its full description and parsed conditions, including
+vacancies outside the shortlist. Those vacancies finish as `filtered`; shortlisted
+vacancies receive final scores and a `VacancyMatch` and finish as `completed`.
+
+Laya's `none`, `weak`, `good`, and `strong` labels map to `0`, `1/3`, `2/3`,
+and `1`. Existing final geometric score weights and match categories are retained.
+A zero component makes the combined score zero. Labels and numeric scores are
+saved in `component_scores.laya`; full vacancy rows also retain their evaluation
+and final scores. These ordinal values need calibration against labeled matches.
 
 ## Embedding and reranking backends
 
@@ -189,70 +194,110 @@ Run the HTTP adapter checks without running Docker or downloading models:
 LITELLM_LOCAL_MODEL_COST_MAP=True .venv/bin/python -m unittest discover -s tests -p test_llama_server.py
 ```
 
-## Browser vacancy collection
+## Vacancy processing workers
 
-`VacancyScrapingService.scrape()` runs the browser pipeline independently of HTTP
-handlers or Celery. The initial adapter supports LinkedIn's public job search;
-HeadHunter continues using the existing official API source. Crawlee manages
-browsers, concurrency, request scheduling and retries. Listing cards are parsed
-in bulk with Selectolax Lexbor after rendering; only selected previews become
-`DETAIL` requests.
+Run PostgreSQL with pgvector and RabbitMQ, configure the existing `DB_` settings
+and `TASKIQ_RABBITMQ_URL`, and apply the additive schema upgrade before deploying
+the new API or workers. The upgrade creates missing tables and adds pipeline
+columns to existing vacancies; existing vacancy data is retained.
 
-Call it from an async application entry point:
-
-```python
-from uuid import UUID
-
-from src.di.container import create_container
-from src.infrastructure.vacancy_sources.linkedin.source import LinkedInVacancySource
-from src.schemas.vacancy import VacancyHardFilters, VacancyScrapingQuery
-from src.services.vacancy_scraping import VacancyScrapingService
-
-async def collect(profile_id: UUID):
-    async with create_container() as container:
-        service = await container.get(VacancyScrapingService)
-        source = await container.get(LinkedInVacancySource)
-        return await service.scrape(
-            source,
-            VacancyScrapingQuery(text="Python backend", location="Germany"),
-            profile_id,
-            filters=VacancyHardFilters(work_formats=["remote"]),
-        )
+```sh
+.venv/bin/python -m src.infrastructure.db.vacancy_pipeline
+.venv/bin/uvicorn src.main:app
+.venv/bin/taskiq worker src.tasks.scraping:io_broker --ack-type when_executed --workers 2 --max-async-tasks 5
+.venv/bin/taskiq worker src.tasks.scraping:laya_broker --ack-type when_executed --workers 1 --max-async-tasks 1
+.venv/bin/taskiq scheduler src.tasks.scraping:scheduler
 ```
 
-Install Chromium and its Linux system libraries with
-`.venv/bin/playwright install --with-deps chromium` in the deployment image.
-The database schema, a stored profile,
-Laya model, existing normalization LLM configuration, and existing embedding model
-must be available. No new Python dependencies are required. Embeddings are used only by
-the existing persistence/matching flow, never to select previews.
+All Laya evaluations run on the `laya` queue. Collection, keyword filtering,
+detailed scraping, normalization, embedding scoring, reranking, final persistence,
+and reconciliation run on `io`. Each worker opens the other broker for publishing
+the next stage. Each queue has its own durable TTL retry queue, so delayed retries
+return to the correct worker without a RabbitMQ plugin.
+[Taskiq acknowledgement documentation](https://taskiq-python.github.io/guide/cli.html)
+describes `when_executed`, which is configured on every task and in these commands.
 
-Deterministic checks use explicit known facts and enabled preferences; unknown
-fields remain eligible. `required_keywords` and `excluded_keywords` optionally
-constrain preview text. Laya batches reuse the existing role/skill questions;
-role fit must be `good` or `strong` and skill fit must be at least `weak`.
-Full details go through `RawVacancy`, the existing normalizer, `NormalizedVacancy`,
-and the existing vacancy repository/unit of work. DI providers supply factories
-that open separate request scopes so concurrent handlers never share a database
-session. The scraping service receives its dependencies and pipeline limits
-explicitly; it does not access the Dishka container or application settings.
-`CrawleeProvider` owns per-run crawler construction, temporary storage, and cleanup.
+Start collection with `POST /api/v1/vacancies/previews/collect`:
 
-`CRAWLEE_` environment settings control concurrency (1/3/5), request rate
-(30/minute), retries (2), navigation/handler timeouts (30/300 seconds), and headless
-mode. `SCRAPING_` settings control search pages (10), unique previews (250), details
-(50), and Laya batch size (32). Move previous browser-related `SCRAPING_` keys to
-`CRAWLEE_`, for example `SCRAPING_MAX_CONCURRENCY` becomes `CRAWLEE_MAX_CONCURRENCY`.
-Nested `CRAWLEE__...` and `SCRAPING__...` settings follow the application's convention.
-The native load-more loop stops at its configured limits or the site's end marker.
-Temporary Crawlee storage is isolated per invocation; committed vacancies provide
-deduplication by source/external ID and URL on subsequent runs. An interrupted
-process starts a fresh discovery run; its temporary queue is not a resume store.
-Search retries retain evaluated previews, including successful earlier batches
-when a later listing page fails. Removed detail pages are skipped; exhausted
-failures are logged and reported alongside all pipeline counters in the result.
-Public login/challenge pages are reported as failures. The adapter does not
-authenticate or bypass challenges.
+```json
+{
+  "profile_id": "PROFILE_UUID",
+  "sources": ["linkedin", "hh"],
+  "preferences": ["Backend"],
+  "query": {"text": "Python backend", "location": "Germany"},
+  "hard_filters": {"work_formats": ["remote"]}
+}
+```
+
+Either names list can be `["all"]`. The API resolves enabled preference IDs and
+source IDs before enqueueing collection IDs. Existing `companies` rows represent
+sources: `name` is the selectable source name, `careers_url` is its listing page,
+and `search_settings.source` names its adapter (`linkedin` or `hh`).
+Built-in source rows are created when first selected. An optional
+`vacancy_page_urls` mapping overrides stored URLs for the selected sources.
+
+Listing pages are scraped in batches and previews are committed immediately
+after duplicate checking, before any evaluation task is published. Exact
+`(source, external_id)` matches are skipped. Normalized company/title matches
+against previews or vacancies discovered in the previous seven days are treated
+as recent reposts. Initial inserts use uniqueness constraints and conflict-safe
+inserts; advisory transaction locks also serialize competing repost checks.
+Later stages update the same row.
+
+Descriptions of at least `SCRAPING_PREVIEW_DESCRIPTION_MIN_LENGTH` characters
+(default 80) are eligible for early Laya evaluation. This is a configurable
+sufficiency heuristic. Smaller previews use keyword relevance against the selected
+preferences. Known hard constraints and required/excluded keywords apply to both
+paths; unknown preview fields remain eligible. Preview evaluation is persisted
+and only gates collection readiness.
+
+Read previews with `GET /api/v1/vacancies/previews/PROFILE_UUID`, then start details
+with `POST /api/v1/vacancies/process`:
+
+```json
+{
+  "profile_id": "PROFILE_UUID",
+  "preview_ids": ["PREVIEW_UUID"],
+  "hard_filters": {"work_formats": ["remote"]},
+  "role_fit": ["good", "strong"],
+  "skill_fit": ["weak", "good", "strong"]
+}
+```
+
+Omit `preview_ids` to select ready previews by filters. Laya label filters apply
+when a preview has an evaluation. The API creates the initial vacancy rows and a
+persistent scoring batch atomically, then publishes vacancy IDs for detailed
+scraping. That batch keeps the embedding shortlist consistent across parsing
+chunks. The tasks publish their successors directly.
+
+Every processing task reloads and locks its existing entities and checks the
+expected status. Completed stages exit without repeating work. Results and next
+statuses commit in the same transaction before publishing the successor.
+Row locks are held through bounded stage I/O to prevent concurrent execution;
+size database pools and worker concurrency accordingly. Worker death rolls back
+the stage transaction and releases its locks.
+
+The scheduled reconciliation task is the only global unfinished-work scan.
+It selects stale non-terminal rows with `FOR UPDATE SKIP LOCKED`, refreshes their
+scheduling timestamp atomically, commits, then republishes the appropriate stage.
+A commit/publish gap, exhausted stage retries, or a failed recovery publication
+is retried after `TASKIQ_STALE_TIMEOUT_SECONDS` (default 900). Concurrent recovery
+runs and currently executing stages cannot claim the same locked row. Run one
+scheduler; `TASKIQ_RECOVERY_CRON` defaults to once per minute.
+
+Taskiq owns stage retries: `TASKIQ_STAGE_ATTEMPTS=3`, with backoff and jitter
+starting at `TASKIQ_RETRY_DELAY_SECONDS=5`.
+HTTP/model clients perform one or two attempts, and normalization has no extra
+business retry loop. RabbitMQ redelivery handles unacknowledged messages after
+worker or connection loss.
+
+Install Chromium with `.venv/bin/playwright install --with-deps chromium`.
+HeadHunter uses its official API; LinkedIn uses public job pages and does not
+authenticate or bypass challenges. `CRAWLEE_` settings control concurrency
+(1/3/5), request rate (30/minute), retries (1), and navigation/handler timeouts
+(30/300 seconds). `SCRAPING_` settings control listing pages (10), previews (250),
+details (50), normalization batch size (5), and Laya batch size (32).
+Crawlee temporary storage remains isolated per invocation.
 
 ## Checks
 
@@ -263,6 +308,7 @@ LITELLM_LOCAL_MODEL_COST_MAP=True .venv/bin/python -m unittest discover -s tests
 ```
 
 The configuration and health routers are exercised in an isolated FastAPI app.
-The existing main application/agent bootstrap is unfinished; these tests do not
-claim that the full application can start. Startup wiring loads the configuration
-manager before serving requests once that separate bootstrap work is completed.
+Vacancy checks cover task replay, batch completion, shortlist ordering, fresh
+detailed evaluation, preview persistence before publication, repost detection,
+and stale recovery. They use fake clients and database sessions; a live
+PostgreSQL/RabbitMQ deployment is needed to verify transport and database locking.

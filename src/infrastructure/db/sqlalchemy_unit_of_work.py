@@ -8,6 +8,7 @@ from src.repositories.profile import ProfileRepository
 from src.repositories.resume import ResumeRepository
 from src.repositories.vacancy import VacancyRepository
 from src.repositories.vacancy_match import VacancyMatchRepository
+from src.repositories.vacancy_preview import VacancyPreviewRepository
 
 
 class SqlAlchemyUnitOfWork:
@@ -18,6 +19,7 @@ class SqlAlchemyUnitOfWork:
         vacancy_repository: VacancyRepository,
         vacancy_match_repository: VacancyMatchRepository,
         resume_repository: ResumeRepository,
+        vacancy_preview_repository: VacancyPreviewRepository,
     ) -> None:
         self._session = session
 
@@ -25,6 +27,7 @@ class SqlAlchemyUnitOfWork:
         self.vacancies = vacancy_repository
         self.vacancy_matches = vacancy_match_repository
         self.resumes = resume_repository
+        self.previews = vacancy_preview_repository
         self._active = False
 
     async def __aenter__(self) -> Self:

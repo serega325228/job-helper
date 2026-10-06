@@ -299,6 +299,8 @@ class ScoringService:
         profile: Profile,
         preferences_by_vacancy: dict[UUID, PreferenceIntent],
         vacancies: dict[UUID, Vacancy],
+        *,
+        batch_size: int = 32,
     ) -> dict[UUID, LayaComparison]:
         if not vacancies:
             return {}
@@ -322,6 +324,7 @@ class ScoringService:
         results_raw = await self._laya.evaluate_batch(
             states,
             MATCH_QUESTIONS,
+            batch_size=batch_size,
         )
         return {
             vacancy_id: LayaComparison(
@@ -345,6 +348,8 @@ class ScoringService:
 
         vacancy_state = {
             "title": vacancy.title,
+            "description": vacancy.description,
+            "soft_conditions": cond.model_dump(mode="json"),
             "requirements": cond.requirements,
             "required_skills": cond.required_skills,
             "preferred_skills": cond.preferred_skills,
