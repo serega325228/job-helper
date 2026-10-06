@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import Computed, Enum, ForeignKey, Index, UniqueConstraint
+from sqlalchemy import Enum, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import DateTime, String, Text
@@ -51,19 +51,8 @@ class VacancyPreview(Base):
     url: Mapped[str] = mapped_column(Text)
     title: Mapped[str] = mapped_column(String(500))
     company_name: Mapped[str | None] = mapped_column(String(500))
-    normalized_company: Mapped[str | None] = mapped_column(
-        Text,
-        Computed(
-            "lower(trim(regexp_replace(company_name, '\\s+', ' ', 'g')))",
-            persisted=True,
-        ),
-    )
-    normalized_title: Mapped[str] = mapped_column(
-        Text,
-        Computed(
-            "lower(trim(regexp_replace(title, '\\s+', ' ', 'g')))", persisted=True
-        ),
-    )
+    normalized_company: Mapped[str | None] = mapped_column(Text)
+    normalized_title: Mapped[str] = mapped_column(Text)
     location: Mapped[str | None] = mapped_column(Text)
     short_description: Mapped[str | None] = mapped_column(Text)
     work_format: Mapped[str | None] = mapped_column(String(50))
@@ -75,7 +64,6 @@ class VacancyPreview(Base):
     salary_to: Mapped[int | None]
     salary_currency: Mapped[str | None] = mapped_column(String(10))
     salary_gross: Mapped[bool | None]
-    evaluation: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     status: Mapped[PreviewStatus] = mapped_column(
         Enum(
             PreviewStatus,

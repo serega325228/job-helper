@@ -107,15 +107,13 @@ class VacancyPreviewRepository:
         self,
         collection_id: UUID,
         previews: list[PreviewData],
-        *,
-        description_min_length: int,
     ) -> list[VacancyPreview]:
         if not previews:
             return []
         normalized = {
             (
-                " ".join((preview.company_name or "").lower().split()),
-                " ".join(preview.title.lower().split()),
+                " ".join((preview.company_name or "").casefold().split()),
+                " ".join(preview.title.casefold().split()),
             )
             for preview in previews
             if preview.company_name
@@ -161,24 +159,22 @@ class VacancyPreviewRepository:
         for preview in previews:
             key = (preview.source, preview.external_id)
             repost = (
-                " ".join((preview.company_name or "").lower().split()),
-                " ".join(preview.title.lower().split()),
+                " ".join((preview.company_name or "").casefold().split()),
+                " ".join(preview.title.casefold().split()),
             )
             if key in existing_keys or (repost[0] and repost in existing_reposts):
                 continue
             existing_keys.add(key)
             if repost[0]:
                 existing_reposts.add(repost)
-            # ponytail: description length approximates preview sufficiency; replace with a labeled relevance gate when calibrated.
             values.append(
                 {
                     **preview.model_dump(mode="python"),
                     "url": str(preview.url),
                     "collection_id": collection_id,
-                    "status": PreviewStatus.PENDING_LAYA
-                    if len((preview.short_description or "").strip())
-                    >= description_min_length
-                    else PreviewStatus.PENDING_FILTER,
+                    "normalized_company": repost[0] or None,
+                    "normalized_title": repost[1],
+                    "status": PreviewStatus.PENDING_FILTER,
                 }
             )
         if not values:
@@ -216,9 +212,7 @@ class VacancyPreviewRepository:
             await self._session.scalars(
                 select(VacancyPreview)
                 .where(
-                    VacancyPreview.status.in_(
-                        [PreviewStatus.PENDING_FILTER, PreviewStatus.PENDING_LAYA]
-                    ),
+                    VacancyPreview.status == PreviewStatus.PENDING_FILTER,
                     VacancyPreview.updated_at < cutoff,
                 )
                 .order_by(VacancyPreview.updated_at)

@@ -4,15 +4,11 @@ from uuid import UUID
 
 from src.config.settings import Settings
 from src.exceptions.profile import ProfileNotFoundError
-from src.exceptions.vacancy import VacancyPreviewEvaluationError
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
-from src.infrastructure.laya.laya_provider import LayaProvider
-from src.infrastructure.laya.questions import MATCH_QUESTIONS
 from src.infrastructure.models.preference_intent import PreferenceIntent
 from src.infrastructure.models.profile import Profile
 from src.infrastructure.models.vacancy import VacancyBatch
 from src.infrastructure.models.vacancy_preview import PreviewCollection
-from src.schemas.scoring import LayaComparison
 from src.schemas.vacancy import (
     BatchStatus,
     PreviewCollectionRequest,
@@ -24,7 +20,6 @@ from src.schemas.vacancy import (
     VacancyScrapingQuery,
     WorkFormat,
 )
-from src.services.embedding_text import build_preference_title_text
 from src.services.improver import ImproverService
 from src.services.scoring import EXPERIENCE_MINIMUMS, SENIORITY_RANKS
 
@@ -60,9 +55,6 @@ def _required_years(value: str | None) -> float | None:
 
 
 class VacancyPreviewEvaluator:
-    def __init__(self, laya: LayaProvider) -> None:
-        self._laya = laya
-
     def accept(
         self,
         preview: VacancyPreview,
@@ -141,12 +133,14 @@ class VacancyPreviewEvaluator:
         text = "\n".join(
             value for value in (preview.title, preview.short_description) if value
         )
-        if any(not _contains(keyword, text) for keyword in query.required_keywords):
-            return False
         if any(_contains(keyword, text) for keyword in query.excluded_keywords):
             return False
-        return not preferences or any(
-            preference.enabled and self._matches_preference(preview, preference)
+        if not preferences:
+            return self.relevant(preview, [], query)
+        return any(
+            preference.enabled
+            and self._matches_preference(preview, preference)
+            and self.relevant(preview, [preference], query)
             for preference in preferences
         )
 
@@ -157,14 +151,21 @@ class VacancyPreviewEvaluator:
         currency: str | None,
         gross: bool | None,
     ) -> bool:
+        if (
+            currency
+            and preview.salary_currency
+            and (_normalize(currency) != _normalize(preview.salary_currency))
+        ):
+            return True
+        if (
+            gross is not None
+            and preview.salary_gross is not None
+            and (gross != preview.salary_gross)
+        ):
+            return True
         return (
             minimum is not None
             and preview.salary_to is not None
-            and currency is not None
-            and preview.salary_currency is not None
-            and _normalize(currency) == _normalize(preview.salary_currency)
-            and gross is not None
-            and preview.salary_gross is gross
             and preview.salary_to < minimum
         )
 
@@ -200,6 +201,10 @@ class VacancyPreviewEvaluator:
             )
         ):
             return False
+        if self._salary_fails(
+            preview, preference.salary_min, preference.salary_currency, None
+        ):
+            return False
         rank = _seniority_rank(preview.seniority or preview.title)
         minimum = _seniority_rank(preference.min_seniority)
         maximum = _seniority_rank(preference.max_seniority)
@@ -208,124 +213,46 @@ class VacancyPreviewEvaluator:
             and (maximum is None or rank <= maximum)
         )
 
-    async def evaluate(
-        self,
-        previews: list[VacancyPreview],
-        profile: Profile,
-        preferences: list[PreferenceIntent],
-        query: VacancyScrapingQuery,
-        *,
-        batch_size: int,
-    ) -> list[VacancyPreview]:
-        comparisons = await self.evaluate_results(
-            previews, profile, preferences, query, batch_size=batch_size
-        )
-        return [
-            preview
-            for preview, comparison in zip(previews, comparisons, strict=True)
-            if comparison.role_fit in {"good", "strong"}
-            and comparison.skill_fit != "none"
-        ]
-
     @staticmethod
     def relevant(
         preview: VacancyPreview,
         preferences: list[PreferenceIntent],
         query: VacancyScrapingQuery,
     ) -> bool:
-        text = f"{preview.title}\n{preview.short_description or ''}"
         terms = [
-            term
-            for preference in preferences
-            for term in preference.target_titles
-            + preference.required_skills
-            + preference.preferred_skills
+            term for preference in preferences for term in preference.target_titles
         ] or [query.text]
+        generic = set(SENIORITY_RANKS) | {
+            "developer",
+            "engineer",
+            "разработчик",
+            "инженер",
+            "and",
+            "or",
+            "и",
+            "the",
+            "of",
+        }
+        # ponytail: title tokens miss semantic synonyms; extend the vocabulary if recall becomes insufficient.
         return any(
-            _contains(term, text)
+            _contains(term, preview.title)
             or any(
-                _contains(word, text)
-                for word in re.findall(r"\w[\w+#.-]*", term)
-                if len(word) >= 2
+                _contains(word, preview.title)
+                for word in (
+                    [
+                        word
+                        for word in re.findall(r"\w[\w+#.-]*", _normalize(term))
+                        if len(word) >= 2 and word not in generic
+                    ]
+                    or [
+                        word
+                        for word in re.findall(r"\w[\w+#.-]*", _normalize(term))
+                        if len(word) >= 2 and word not in SENIORITY_RANKS
+                    ]
+                )
             )
             for term in terms
         )
-
-    async def evaluate_results(
-        self,
-        previews: list[VacancyPreview],
-        profile: Profile,
-        preferences: list[PreferenceIntent],
-        query: VacancyScrapingQuery,
-        *,
-        batch_size: int,
-    ) -> list[LayaComparison]:
-        if batch_size < 1:
-            raise ValueError("batch_size must be greater than zero")
-        evaluated: list[LayaComparison] = []
-        for offset in range(0, len(previews), batch_size):
-            batch = previews[offset : offset + batch_size]
-            states = []
-            for preview in batch:
-                matching = [
-                    preference
-                    for preference in preferences
-                    if preference.enabled
-                    and self._matches_preference(preview, preference)
-                ]
-                states.append(
-                    {
-                        "candidate": {
-                            "target_role": "; ".join(
-                                map(build_preference_title_text, matching),
-                            )
-                            or query.text,
-                            "skills": profile.skills,
-                            "experience": profile.experience,
-                            "seniority": profile.seniority,
-                            "experience_years": profile.experience_years,
-                            "preferences": [
-                                {
-                                    "description": preference.description,
-                                    "required_skills": preference.required_skills,
-                                    "preferred_skills": preference.preferred_skills,
-                                    "locations": preference.locations,
-                                    "work_formats": preference.work_formats,
-                                    "employment_types": preference.employment_types,
-                                    "salary_min": preference.salary_min,
-                                    "salary_currency": preference.salary_currency,
-                                    "min_seniority": preference.min_seniority,
-                                    "max_seniority": preference.max_seniority,
-                                }
-                                for preference in matching
-                            ],
-                        },
-                        "vacancy": preview.model_dump(mode="json"),
-                    },
-                )
-            try:
-                results = await self._laya.evaluate_batch(
-                    states,
-                    MATCH_QUESTIONS,
-                    batch_size=batch_size,
-                )
-                if len(results) != len(batch):
-                    raise ValueError(
-                        "Laya returned a different number of preview results"
-                    )
-                comparisons = [
-                    LayaComparison(
-                        role_fit=result["answers"]["role_fit"]["choice"],
-                        skill_fit=result["answers"]["skill_fit"]["choice"],
-                    )
-                    for result in results
-                ]
-            except Exception as error:
-                raise VacancyPreviewEvaluationError(
-                    "Vacancy preview evaluation failed",
-                ) from error
-            evaluated.extend(comparisons)
-        return evaluated
 
 
 class VacancyPreviewService:
@@ -417,32 +344,22 @@ class VacancyPreviewService:
 
     async def save_scraped(
         self, collection_id: UUID, previews: list[VacancyPreview]
-    ) -> dict[PreviewStatus, list[UUID]]:
+    ) -> list[UUID]:
         async with self._uow as uow:
             collection = await uow.previews.get_collection(collection_id)
             if collection is None:
                 raise ValueError("Preview collection is missing")
             if any(preview.source != collection.source for preview in previews):
                 raise ValueError("Preview source does not match its collection")
-            saved = await uow.previews.save_new(
-                collection_id,
-                previews,
-                description_min_length=self._settings.scraping.preview_description_min_length,
-            )
-        return {
-            status: [preview.id for preview in saved if preview.status == status]
-            for status in (PreviewStatus.PENDING_FILTER, PreviewStatus.PENDING_LAYA)
-        }
+            saved = await uow.previews.save_new(collection_id, previews)
+        return [preview.id for preview in saved]
 
-    async def evaluate(self, preview_ids: list[UUID], *, use_laya: bool) -> None:
-        expected = (
-            PreviewStatus.PENDING_LAYA if use_laya else PreviewStatus.PENDING_FILTER
-        )
+    async def filter_previews(self, preview_ids: list[UUID]) -> None:
         async with self._uow as uow:
             previews = [
                 preview
                 for preview in await uow.previews.get_by_ids(preview_ids, lock=True)
-                if preview.status == expected
+                if preview.status == PreviewStatus.PENDING_FILTER
             ]
             groups: dict[UUID, list] = {}
             for preview in previews:
@@ -461,40 +378,16 @@ class VacancyPreviewService:
                 ]
                 query = VacancyScrapingQuery.model_validate(collection.query)
                 filters = VacancyHardFilters.model_validate(collection.hard_filters)
-                accepted = []
                 for preview in group:
                     data = VacancyPreview.model_validate(preview)
-                    if preferences and self._evaluator.accept(
-                        data, profile, preferences, filters, query
-                    ):
-                        accepted.append((preview, data))
-                    else:
-                        preview.status = PreviewStatus.REJECTED
-                if use_laya:
-                    comparisons = await self._evaluator.evaluate_results(
-                        [data for preview, data in accepted],
-                        profile,
-                        preferences,
-                        query,
-                        batch_size=self._settings.scraping.laya_batch_size,
+                    preview.status = (
+                        PreviewStatus.READY
+                        if preferences
+                        and self._evaluator.accept(
+                            data, profile, preferences, filters, query
+                        )
+                        else PreviewStatus.REJECTED
                     )
-                    for (preview, data), comparison in zip(
-                        accepted, comparisons, strict=True
-                    ):
-                        preview.evaluation = comparison.model_dump(mode="json")
-                        preview.status = (
-                            PreviewStatus.READY
-                            if comparison.role_fit in {"good", "strong"}
-                            and comparison.skill_fit != "none"
-                            else PreviewStatus.REJECTED
-                        )
-                else:
-                    for preview, data in accepted:
-                        preview.status = (
-                            PreviewStatus.READY
-                            if self._evaluator.relevant(data, preferences, query)
-                            else PreviewStatus.REJECTED
-                        )
 
     async def select_for_details(self, request: PreviewSelectionRequest) -> list[UUID]:
         async with self._uow as uow:
@@ -506,14 +399,6 @@ class VacancyPreviewService:
             for preview in await uow.previews.list_ready(
                 request.profile_id, request.preview_ids
             ):
-                if preview.evaluation is not None and any(
-                    allowed and preview.evaluation.get(name) not in allowed
-                    for name, allowed in (
-                        ("role_fit", request.role_fit),
-                        ("skill_fit", request.skill_fit),
-                    )
-                ):
-                    continue
                 collection = await uow.previews.get_collection(preview.collection_id)
                 preferences = await uow.profiles.get_preferences_by_ids(
                     request.profile_id,
@@ -555,6 +440,8 @@ class VacancyPreviewService:
                         "url": preview.url,
                         "title": preview.title,
                         "company_name": preview.company_name,
+                        "normalized_company": _normalize(preview.company_name) or None,
+                        "normalized_title": _normalize(preview.title),
                         "description": "",
                         "processing_status": ProcessingStatus.PENDING_SCRAPE,
                     }

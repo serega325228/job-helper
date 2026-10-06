@@ -1,10 +1,11 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from pydantic import ValidationError
 from structlog import get_logger
 
+from src.config.settings import Settings
 from src.exceptions.vacancy import VacancyNormalizationError
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.models.vacancy import Vacancy
@@ -12,7 +13,11 @@ from src.ports.embedder import Embedder
 from src.ports.vacancy_normalizer import VacancyNormalizer
 from src.ports.vacancy_source import VacancySource
 from src.schemas.vacancy import (
+    BatchStatus,
+    CollectionStatus,
     NormalizedVacancy,
+    PreviewStatus,
+    ProcessingStatus,
     RawVacancy,
     VacancyHardFilters,
     VacancyReference,
@@ -33,6 +38,58 @@ class VacancyService:
         self._uow = unit_of_work
         self._normalizer = normalizer
         self._embedder = embedder
+
+    async def parse_vacancies(self, vacancy_ids: list[UUID]) -> set[UUID]:
+        batch_ids = set()
+        async with self._uow as uow:
+            vacancies = await uow.vacancies.get_stage(
+                vacancy_ids, ProcessingStatus.PENDING_PARSE
+            )
+            if not vacancies:
+                return batch_ids
+            raw = [
+                RawVacancy.model_validate(vacancy.raw_document) for vacancy in vacancies
+            ]
+            normalized = await self.normalize_vacancies(raw)
+            normalized_by_key = {
+                (item.source, item.external_id): item for item in normalized
+            }
+            for vacancy, document in zip(vacancies, raw, strict=True):
+                values = self._to_persistence_values(
+                    raw=document,
+                    normalized=normalized_by_key[(vacancy.source, vacancy.external_id)],
+                    seen_at=datetime.now(UTC),
+                )
+                for field, value in values.items():
+                    setattr(vacancy, field, value)
+                vacancy.processing_status = ProcessingStatus.PENDING_EMBEDDING
+                batch_ids.add(vacancy.batch_id)
+        return batch_ids
+
+    async def claim_stale_processing(
+        self, settings: Settings
+    ) -> dict[
+        CollectionStatus | PreviewStatus | ProcessingStatus | BatchStatus, list[UUID]
+    ]:
+        now = datetime.now(UTC)
+        cutoff = now - timedelta(seconds=settings.taskiq.stale_timeout_seconds)
+        limit = settings.taskiq.recovery_batch_size
+        claimed = {}
+        async with self._uow as uow:
+            groups = (
+                (await uow.previews.stale_collections(cutoff, limit), "status"),
+                (await uow.previews.stale_previews(cutoff, limit), "status"),
+                (
+                    await uow.vacancies.stale_vacancies(cutoff, limit),
+                    "processing_status",
+                ),
+                (await uow.vacancies.stale_batches(cutoff, limit), "status"),
+            )
+            for rows, status_field in groups:
+                for row in rows:
+                    claimed.setdefault(getattr(row, status_field), []).append(row.id)
+                    row.updated_at = now
+        return claimed
 
     async def ingest_vacancies(
         self,
@@ -283,6 +340,13 @@ class VacancyService:
             "url": str(raw.url),
             "title": raw.title or normalized.title,
             "company_name": normalized.company_name,
+            "normalized_company": " ".join(
+                (normalized.company_name or "").casefold().split()
+            )
+            or None,
+            "normalized_title": " ".join(
+                (raw.title or normalized.title).casefold().split()
+            ),
             "description": normalized.description,
             "area_id": normalized.area_id,
             "country": normalized.country,

@@ -24,7 +24,6 @@ class EmploymentType(StrEnum):
 
 class PreviewStatus(StrEnum):
     PENDING_FILTER = "pending_filter"
-    PENDING_LAYA = "pending_laya"
     READY = "ready"
     REJECTED = "rejected"
     SELECTED = "selected"
@@ -140,24 +139,15 @@ class PreviewSelectionRequest(BaseModel):
     profile_id: UUID
     preview_ids: list[UUID] | None = None
     hard_filters: VacancyHardFilters = Field(default_factory=VacancyHardFilters)
-    role_fit: list[str] = Field(default_factory=list)
-    skill_fit: list[str] = Field(default_factory=list)
     limit: int = Field(default=50, ge=1, le=250)
     search_limit: int = Field(default=100, ge=1)
     rerank_limit: int = Field(default=40, ge=1)
     title_weight: float = Field(default=0.4, ge=0, le=1)
 
-    @model_validator(mode="after")
-    def validate_fit_labels(self) -> Self:
-        if set(self.role_fit + self.skill_fit) - {"none", "weak", "good", "strong"}:
-            raise ValueError("Unknown Laya fit label")
-        return self
-
 
 class PreviewResponse(VacancyPreview):
     id: UUID
     status: PreviewStatus
-    evaluation: dict[str, Any] | None = None
 
 
 class VacancyScrapingResult(BaseModel):
@@ -166,8 +156,6 @@ class VacancyScrapingResult(BaseModel):
     search_pages: int = 0
     previews_discovered: int = 0
     rejected_by_filters: int = 0
-    sent_to_laya: int = 0
-    rejected_by_laya: int = 0
     detail_pages_enqueued: int = 0
     detail_pages_scraped: int = 0
     duplicates_skipped: int = 0

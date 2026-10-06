@@ -6,14 +6,13 @@ from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 
 from sqlalchemy.dialects import postgresql
+from taskiq import TaskiqMessage, TaskiqResult
 
 from src.config.settings import Settings
 from src.di.container import create_container
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.models.vacancy import Vacancy, VacancyBatch
 from src.infrastructure.models.vacancy_preview import PreviewCollection
-from src.infrastructure.vacancy_sources.hh.source import HhVacancySource
-from src.infrastructure.vacancy_sources.linkedin.source import LinkedInVacancySource
 from src.repositories.vacancy_preview import VacancyPreviewRepository
 from src.schemas.scoring import (
     LayaComparison,
@@ -34,7 +33,7 @@ from src.schemas.vacancy_match import VacancyEmbeddingSearchResult
 from src.services.scoring import ScoringService
 from src.services.vacancy import VacancyService
 from src.services.vacancy_match import VacancyMatchService
-from src.services.vacancy_scraping import PreviewServiceFactory, VacancyScrapingService
+from src.services.vacancy_scraping import VacancyScrapingService
 from src.tasks import scraping as tasks
 
 
@@ -57,7 +56,6 @@ class VacancyPipelineTests(unittest.IsolatedAsyncioTestCase):
         for task in (
             tasks.collect_previews,
             tasks.filter_previews,
-            tasks.evaluate_previews,
             tasks.scrape_details,
             tasks.parse_vacancies,
             tasks.score_embeddings,
@@ -86,10 +84,7 @@ class VacancyPipelineTests(unittest.IsolatedAsyncioTestCase):
 
         async def persist(collection_id, previews):
             events.append("persist")
-            return {
-                PreviewStatus.PENDING_FILTER: [preview_id],
-                PreviewStatus.PENDING_LAYA: [],
-            }
+            return [preview_id]
 
         @asynccontextmanager
         async def factory():
@@ -107,16 +102,19 @@ class VacancyPipelineTests(unittest.IsolatedAsyncioTestCase):
                 ]
             )
 
-        self.dependencies.update(
-            {
-                PreviewServiceFactory: factory,
-                VacancyScrapingService: SimpleNamespace(
-                    scrape_previews=AsyncMock(side_effect=scrape)
-                ),
-                HhVacancySource: object(),
-                LinkedInVacancySource: object(),
-            }
+        service = VacancyScrapingService(
+            Mock(),
+            self.uow,
+            factory,
+            Mock(),
+            Mock(),
+            max_search_pages=10,
+            max_previews=250,
+            batch_size=32,
+            concurrency=3,
         )
+        service.scrape_previews = AsyncMock(side_effect=scrape)
+        self.dependencies[VacancyScrapingService] = service
         self.queues[tasks.filter_previews.task_name].side_effect = lambda *args: (
             events.append("enqueue")
         )
@@ -179,7 +177,6 @@ class VacancyPipelineTests(unittest.IsolatedAsyncioTestCase):
                     title=vacancy.title,
                     url=vacancy.url,
                 ).model_dump(),
-                evaluation={"role_fit": "strong", "skill_fit": "strong"},
             )
             for vacancy in vacancies
         ]
@@ -200,8 +197,13 @@ class VacancyPipelineTests(unittest.IsolatedAsyncioTestCase):
                 content_embedding=None,
             )
         ]
-        self.uow.vacancy_matches.get_by_profile_and_vacancy_ids.return_value = []
-        self.uow.vacancy_matches.add = Mock()
+        matches = []
+        self.uow.vacancy_matches.get_by_profile_and_vacancy_ids.side_effect = (
+            lambda profile_id, ids: [
+                match for match in matches if match.vacancy_id in ids
+            ]
+        )
+        self.uow.vacancy_matches.add_all = Mock(side_effect=matches.extend)
         self.uow.vacancy_matches.search_by_preferences.return_value = [
             VacancyEmbeddingSearchResult(
                 vacancy_id=vacancy.id,
@@ -243,12 +245,13 @@ class VacancyPipelineTests(unittest.IsolatedAsyncioTestCase):
 
         async def evaluate(profile, preferences, items, **kwargs):
             events.append("laya")
+            self.assertEqual(set(items), {vacancies[0].id})
             self.assertEqual(
                 items[vacancies[0].id].description, raw[("hh", "0")].raw_text
             )
             return {
                 vacancy.id: LayaComparison(role_fit="good", skill_fit="weak")
-                for vacancy in vacancies
+                for vacancy in items.values()
             }
 
         scoring = Mock(spec=ScoringService)
@@ -258,16 +261,24 @@ class VacancyPipelineTests(unittest.IsolatedAsyncioTestCase):
         )
         scoring.rerank_vacancies.side_effect = rerank
         scoring.laya_match_vacancies.side_effect = evaluate
+        scraping = VacancyScrapingService(
+            Mock(),
+            self.uow,
+            Mock(),
+            Mock(),
+            Mock(),
+            max_search_pages=10,
+            max_previews=250,
+            batch_size=32,
+            concurrency=3,
+        )
+        scraping.scrape_details = AsyncMock(return_value=raw)
         self.dependencies.update(
             {
                 VacancyService: service,
                 ScoringService: scoring,
                 VacancyMatchService: VacancyMatchService(self.uow, scoring),
-                VacancyScrapingService: SimpleNamespace(
-                    scrape_details=AsyncMock(return_value=raw)
-                ),
-                HhVacancySource: object(),
-                LinkedInVacancySource: object(),
+                VacancyScrapingService: scraping,
             }
         )
         ids = [vacancy.id for vacancy in vacancies]
@@ -284,15 +295,16 @@ class VacancyPipelineTests(unittest.IsolatedAsyncioTestCase):
             await run_task(task, *arguments, dependencies=self.dependencies)
         self.assertEqual(events, ["rerank", "laya"])
         self.assertEqual(vacancies[1].processing_status, ProcessingStatus.FILTERED)
-        self.assertEqual(
-            vacancies[1].evaluation, {"role_fit": "good", "skill_fit": "weak"}
-        )
-        self.assertEqual(
-            vacancies[0].evaluation, {"role_fit": "good", "skill_fit": "weak"}
-        )
+        self.assertEqual(matches[1].component_scores.get("laya"), None)
+        self.assertEqual(matches[0].component_scores["laya"]["role_fit"], "good")
         self.assertEqual(batch.status, BatchStatus.COMPLETED)
-        self.uow.vacancy_matches.add.assert_called_once()
-        self.assertIn("total_score", vacancies[0].scores)
+        self.uow.vacancy_matches.add_all.assert_called_once()
+        self.assertIsNotNone(matches[0].total_score)
+        self.assertEqual(matches[0].preference_intent_id, preference_id)
+        self.assertEqual(matches[0].profile_id, batch.profile_id)
+        self.assertEqual(matches[0].component_scores["semantic"]["combined"], 0.86)
+        self.assertNotIn("scores", Vacancy.__table__.columns)
+        self.assertNotIn("evaluation", Vacancy.__table__.columns)
         self.assertEqual(
             self.uow.vacancy_matches.search_by_preferences.await_args.kwargs[
                 "vacancy_ids"
@@ -306,7 +318,12 @@ class VacancyPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.uow.vacancies.get_batch_vacancies.return_value = [
             SimpleNamespace(processing_status=ProcessingStatus.PENDING_PARSE)
         ]
-        self.dependencies.update({VacancyService: Mock(), ScoringService: Mock()})
+        self.dependencies.update(
+            {
+                VacancyService: Mock(),
+                VacancyMatchService: VacancyMatchService(self.uow, Mock()),
+            }
+        )
         await run_task(tasks.score_embeddings, batch.id, dependencies=self.dependencies)
         self.uow.profiles.get_by_id.assert_not_awaited()
         self.queues[tasks.rerank_vacancies.task_name].assert_not_awaited()
@@ -314,7 +331,7 @@ class VacancyPipelineTests(unittest.IsolatedAsyncioTestCase):
     async def test_recovery_reschedules_stale_rows_once_per_timeout(self):
         old = datetime.now(UTC) - timedelta(hours=1)
         preview = SimpleNamespace(
-            id=uuid4(), status=PreviewStatus.PENDING_LAYA, updated_at=old
+            id=uuid4(), status=PreviewStatus.PENDING_FILTER, updated_at=old
         )
         batch = SimpleNamespace(
             id=uuid4(), status=BatchStatus.PENDING_SAVE, updated_at=old
@@ -327,9 +344,10 @@ class VacancyPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.uow.vacancies.stale_batches.side_effect = lambda cutoff, limit: (
             [batch] if batch.updated_at < cutoff else []
         )
+        self.dependencies[VacancyService] = VacancyService(self.uow, Mock(), Mock())
         await run_task(tasks.reconcile_processing, dependencies=self.dependencies)
         await run_task(tasks.reconcile_processing, dependencies=self.dependencies)
-        self.queues[tasks.evaluate_previews.task_name].assert_awaited_once_with(
+        self.queues[tasks.filter_previews.task_name].assert_awaited_once_with(
             [preview.id]
         )
         self.queues[tasks.save_vacancy_scores.task_name].assert_awaited_once_with(
@@ -367,7 +385,7 @@ class VacancyPipelineTests(unittest.IsolatedAsyncioTestCase):
                 ("old-repost", "Python", "Old Company"),
             )
         ]
-        await repository.save_new(uuid4(), previews, description_min_length=80)
+        await repository.save_new(uuid4(), previews)
         params = (
             session.scalars.await_args.args[0]
             .compile(dialect=postgresql.dialect())
@@ -376,22 +394,55 @@ class VacancyPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["external_id_m0"], "old-repost")
         self.assertNotIn("external_id_m1", params)
 
-    async def test_workers_use_separate_queues_acknowledgement_and_valid_dependencies(
+    async def test_broker_routes_queues_acknowledgement_and_valid_dependencies(
         self,
     ):
-        for task in tasks.io_broker.get_all_tasks().values():
+        for task in tasks.broker.get_all_tasks().values():
             self.assertEqual(task.labels["ack_type"], "when_executed")
+            self.assertEqual(
+                task.labels["queue_name"],
+                (
+                    self.settings.taskiq.laya_queue
+                    if task is tasks.evaluate_vacancies
+                    else self.settings.taskiq.io_queue
+                ),
+            )
         self.assertEqual(
-            set(tasks.laya_broker.get_all_tasks()),
-            {tasks.evaluate_previews.task_name, tasks.evaluate_vacancies.task_name},
+            {queue.routing_key for queue in tasks.broker._task_queues}, {"io", "laya"}
         )
-        self.assertEqual(
-            tasks.io_broker._task_queues[0].routing_key, self.settings.taskiq.io_queue
+        self.assertIsNone(Vacancy.__table__.columns["normalized_title"].computed)
+        message = TaskiqMessage(
+            task_id=str(uuid4()),
+            task_name=tasks.evaluate_vacancies.task_name,
+            labels={"queue_name": "laya", "ack_type": "when_executed"},
+            args=[str(uuid4())],
+            kwargs={},
         )
-        self.assertEqual(
-            tasks.laya_broker._task_queues[0].routing_key,
-            self.settings.taskiq.laya_queue,
-        )
+        with (
+            patch(
+                "src.infrastructure.taskiq.broker.asyncio.sleep", new_callable=AsyncMock
+            ) as sleep,
+            patch.object(tasks.broker, "kick", new_callable=AsyncMock) as publish,
+        ):
+            for attempt in range(3):
+                message.labels["_retries"] = attempt
+                error = RuntimeError("transient")
+                await tasks.broker.middlewares[0].on_error(
+                    message,
+                    TaskiqResult(
+                        is_err=True, return_value=None, error=error, execution_time=0
+                    ),
+                    error,
+                )
+            self.assertEqual(publish.await_count, 2)
+            self.assertEqual(sleep.await_count, 2)
+            for attempt, call in enumerate(sleep.await_args_list, start=1):
+                self.assertGreaterEqual(
+                    call.args[0], self.settings.taskiq.retry_delay_seconds * attempt
+                )
+            for call in publish.await_args_list:
+                self.assertEqual(call.args[0].labels["queue_name"], "laya")
+                self.assertNotIn("delay", call.args[0].labels)
         container = create_container()
         await container.close()
 

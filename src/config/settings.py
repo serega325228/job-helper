@@ -265,7 +265,6 @@ class ScrapingSettings(BaseSettings):
     max_detail_pages: int = Field(default=50, ge=1)
     laya_batch_size: int = Field(default=32, ge=1)
     normalization_batch_size: int = Field(default=5, ge=1)
-    preview_description_min_length: int = Field(default=80, ge=1)
 
 
 class LoggingSettings(BaseSettings):

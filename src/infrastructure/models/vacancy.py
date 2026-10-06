@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Computed, Enum, ForeignKey, Index, UniqueConstraint
+from sqlalchemy import Enum, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import Boolean, DateTime, String, Text
@@ -30,19 +30,8 @@ class Vacancy(Base):
     url: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
     company_name: Mapped[str | None] = mapped_column(String(500), index=True)
-    normalized_company: Mapped[str | None] = mapped_column(
-        Text,
-        Computed(
-            "lower(trim(regexp_replace(company_name, '\\s+', ' ', 'g')))",
-            persisted=True,
-        ),
-    )
-    normalized_title: Mapped[str] = mapped_column(
-        Text,
-        Computed(
-            "lower(trim(regexp_replace(title, '\\s+', ' ', 'g')))", persisted=True
-        ),
-    )
+    normalized_company: Mapped[str | None] = mapped_column(Text)
+    normalized_title: Mapped[str] = mapped_column(Text)
     description: Mapped[str] = mapped_column(Text, nullable=False)
 
     area_id: Mapped[str | None] = mapped_column(String(100), index=True)
@@ -100,8 +89,6 @@ class Vacancy(Base):
         index=True,
     )
     raw_document: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-    scores: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-    evaluation: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         index=True,

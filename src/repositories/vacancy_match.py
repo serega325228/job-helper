@@ -59,7 +59,10 @@ class VacancyMatchRepository:
     ) -> list[VacancyMatch]:
         statement = (
             select(VacancyMatch)
-            .where(VacancyMatch.profile_id == profile_id)
+            .where(
+                VacancyMatch.profile_id == profile_id,
+                VacancyMatch.total_score.is_not(None),
+            )
             .order_by(VacancyMatch.total_score.desc())
             .limit(limit)
         )
@@ -188,7 +191,10 @@ class VacancyMatchRepository:
         stmt = (
             select(func.count())
             .select_from(VacancyMatch)
-            .where(VacancyMatch.profile_id == profile_id)
+            .where(
+                VacancyMatch.profile_id == profile_id,
+                VacancyMatch.total_score.is_not(None),
+            )
         )
 
         result = await self._session.scalar(stmt)

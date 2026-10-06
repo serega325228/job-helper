@@ -1,11 +1,6 @@
-import threading
 import unittest
 from datetime import UTC, datetime
-from unittest.mock import Mock
 
-from src.exceptions.vacancy import VacancyPreviewEvaluationError
-from src.infrastructure.laya.laya_provider import LayaProvider
-from src.infrastructure.laya.questions import MATCH_QUESTIONS
 from src.infrastructure.models.preference_intent import PreferenceIntent
 from src.infrastructure.models.profile import Profile
 from src.schemas.vacancy import (
@@ -47,16 +42,9 @@ def preference(**values) -> PreferenceIntent:
     )
 
 
-def result(role="good", skill="weak") -> dict:
-    return {
-        "answers": {"role_fit": {"choice": role}, "skill_fit": {"choice": skill}},
-    }
-
-
-class VacancyPreviewTest(unittest.IsolatedAsyncioTestCase):
+class VacancyPreviewTest(unittest.TestCase):
     def setUp(self):
-        self.laya = Mock(spec=LayaProvider)
-        self.evaluator = VacancyPreviewEvaluator(self.laya)
+        self.evaluator = VacancyPreviewEvaluator()
         self.profile = Profile(
             skills=["Python"],
             experience=["Built APIs"],
@@ -87,12 +75,14 @@ class VacancyPreviewTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(
             self.accept(
-                preview(title="Senior developer"),
+                preview(title="Senior Python developer"),
                 seniorities=["junior", "staff"],
             ),
         )
         self.assertFalse(
-            self.accept(preview(title="Senior developer"), seniorities=["junior"]),
+            self.accept(
+                preview(title="Senior Python developer"), seniorities=["junior"]
+            ),
         )
 
     def test_preferences_are_alternatives_and_disabled_preferences_do_not_qualify(self):
@@ -109,7 +99,7 @@ class VacancyPreviewTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_keyword_boundaries_preserve_language_names(self):
-        self.query = VacancyScrapingQuery(text="developer", required_keywords=["Java"])
+        self.query = VacancyScrapingQuery(text="Java", required_keywords=["Java"])
         self.assertFalse(self.accept(preview(title="JavaScript developer")))
         self.assertTrue(self.accept(preview(title="Java developer")))
         self.query = VacancyScrapingQuery(text="developer", excluded_keywords=["Go"])
@@ -117,7 +107,7 @@ class VacancyPreviewTest(unittest.IsolatedAsyncioTestCase):
             self.accept(preview(company_name="Google", title="Google developer")),
         )
         self.assertFalse(self.accept(preview(title="Go developer")))
-        self.query = VacancyScrapingQuery(text="developer", required_keywords=["C++"])
+        self.query = VacancyScrapingQuery(text="C++", required_keywords=["C++"])
         self.assertTrue(self.accept(preview(title="C++ developer")))
         self.assertFalse(self.accept(preview(title="C++17 developer")))
 
@@ -146,7 +136,7 @@ class VacancyPreviewTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.accept(preview(experience="up to 5 years")))
         self.assertTrue(self.accept(preview(experience="Python 3 experience")))
 
-    def test_salary_requires_known_comparable_ceiling_currency_and_gross(self):
+    def test_salary_rejects_known_contradictions_but_preserves_unknown_ceiling(self):
         filters = {"salary_min": 100, "salary_currency": "USD", "salary_gross": False}
         self.assertFalse(
             self.accept(
@@ -154,13 +144,13 @@ class VacancyPreviewTest(unittest.IsolatedAsyncioTestCase):
                 **filters,
             ),
         )
-        self.assertTrue(
+        self.assertFalse(
             self.accept(
                 preview(salary_to=50, salary_currency="EUR", salary_gross=False),
                 **filters,
             ),
         )
-        self.assertTrue(
+        self.assertFalse(
             self.accept(preview(salary_to=50, salary_currency="USD"), **filters),
         )
         self.assertTrue(
@@ -187,58 +177,26 @@ class VacancyPreviewTest(unittest.IsolatedAsyncioTestCase):
             self.accept(preview(location="New York"), cities=["Yorkshire"])
         )
 
-    async def test_evaluation_batches_use_existing_questions_and_leave_event_loop_thread(
-        self,
-    ):
-        calling_thread = threading.get_ident()
-        evaluation_threads = []
-
-        def evaluate(states, questions, *, batch_size, **kwargs):
-            evaluation_threads.append(threading.get_ident())
-            self.assertIs(questions, MATCH_QUESTIONS)
-            self.assertEqual(batch_size, 2)
-            self.assertEqual(states[0]["candidate"]["skills"], ["Python"])
-            return [result("good", "weak"), result("weak", "strong")][: len(states)]
-
-        provider = LayaProvider()
-        provider._agent = Mock()
-        provider._agent.predict_batch.side_effect = evaluate
-        self.evaluator = VacancyPreviewEvaluator(provider)
-        vacancies = [preview(external_id=str(index)) for index in range(3)]
-        accepted = await self.evaluator.evaluate(
-            vacancies,
-            self.profile,
-            [preference()],
-            self.query,
-            batch_size=2,
-        )
-        self.assertEqual(accepted, [vacancies[0], vacancies[2]])
-        self.assertEqual(provider._agent.predict_batch.call_count, 2)
-        self.assertTrue(all(thread != calling_thread for thread in evaluation_threads))
-
-    async def test_malformed_or_incomplete_evaluation_is_rejected(self):
-        for results in ([], [result("invented", "good")], [{}]):
-            with self.subTest(results=results):
-                self.laya.evaluate_batch.return_value = results
-                with self.assertRaises(VacancyPreviewEvaluationError):
-                    await self.evaluator.evaluate(
-                        [preview()],
-                        self.profile,
-                        [],
-                        self.query,
-                        batch_size=2,
-                    )
-        self.laya.evaluate_batch.return_value = [result("strong", "none")]
-        self.assertEqual(
-            await self.evaluator.evaluate(
-                [preview()],
-                self.profile,
-                [],
-                self.query,
-                batch_size=2,
+    def test_partial_ai_preview_survives_but_explicit_contradictions_do_not(self):
+        preferences = [
+            preference(
+                target_titles=["Senior AI engineer"],
+                min_seniority="senior",
+                salary_min=300_000,
+            )
+        ]
+        for values, accepted in (
+            ({"title": "AI developer"}, True),
+            ({"title": "Middle AI engineer", "salary_to": 150_000}, False),
+            ({"title": "Senior AI engineer", "salary_to": 150_000}, False),
+            ({"title": "AI engineer", "salary_from": 150_000}, True),
+            (
+                {"title": "Senior civil engineer", "short_description": "AI tools"},
+                False,
             ),
-            [],
-        )
+        ):
+            with self.subTest(values=values):
+                self.assertEqual(self.accept(preview(**values), preferences), accepted)
 
 
 if __name__ == "__main__":

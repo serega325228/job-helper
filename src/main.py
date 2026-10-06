@@ -11,7 +11,7 @@ from src.config.settings import get_settings
 from src.di.container import create_container
 from src.exceptions.config import ConfigError, LLMError
 from src.infrastructure.llm.llm import LLMConfigManager
-from src.infrastructure.taskiq.broker import io_broker, laya_broker
+from src.infrastructure.taskiq.broker import broker
 from src.routers.config import (
     config_error_handler,
     config_validation_error_handler,
@@ -30,15 +30,11 @@ logger = get_logger()
 async def lifespan(app: FastAPI):
     configure_logging(settings.logging)
     await container.get(LLMConfigManager)
-    await io_broker.startup()
+    await broker.startup()
     try:
-        await laya_broker.startup()
-        try:
-            yield
-        finally:
-            await laya_broker.shutdown()
+        yield
     finally:
-        await io_broker.shutdown()
+        await broker.shutdown()
         await container.close()
 
 

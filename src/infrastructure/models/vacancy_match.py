@@ -42,8 +42,8 @@ class VacancyMatch(Base):
     )
     profile_rerank_score: Mapped[float | None] = mapped_column(Float)
     preference_rerank_score: Mapped[float | None] = mapped_column(Float)
-    total_score: Mapped[float] = mapped_column(Float, nullable=False, index=True)
-    category: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    total_score: Mapped[float | None] = mapped_column(Float, index=True)
+    category: Mapped[str | None] = mapped_column(String(30), index=True)
     hard_constraints_passed: Mapped[bool] = mapped_column(
         Boolean,
         default=True,

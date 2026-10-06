@@ -315,14 +315,22 @@ class ServiceProvider(Provider):
 
         return open_preview_service
 
-    @provide(scope=Scope.APP)
+    @provide(scope=Scope.REQUEST)
     def vacancy_scraping_service(
         self,
         crawler_factory: CrawlerFactory,
+        unit_of_work: SqlAlchemyUnitOfWork,
+        preview_service_factory: PreviewServiceFactory,
+        hh: HhVacancySource,
+        linkedin: LinkedInVacancySource,
         settings: Settings,
     ) -> VacancyScrapingService:
         return VacancyScrapingService(
             crawler_factory,
+            unit_of_work,
+            preview_service_factory,
+            hh,
+            linkedin,
             max_search_pages=settings.scraping.max_search_pages,
             max_previews=settings.scraping.max_previews,
             batch_size=settings.scraping.laya_batch_size,
