@@ -87,6 +87,8 @@ class PreferenceIntent(Base):
         Vector(EMBEDDING_DIMENSIONS),
     )
 
+    embedding_fingerprint: Mapped[str | None] = mapped_column(String(64))
+
     weight: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

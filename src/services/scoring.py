@@ -1,5 +1,5 @@
 import asyncio
-import math
+import hashlib
 import re
 from collections import defaultdict
 from typing import ClassVar
@@ -18,7 +18,13 @@ from src.schemas.scoring import (
     ProfileComparison,
     VacancyRerankScores,
 )
-from src.schemas.vacancy import VacancySoftConditions
+from src.schemas.vacancy import (
+    EXPERIENCE_MINIMUMS,
+    SENIORITY_RANKS,
+    NormalizedVacancy,
+    VacancyPreview,
+    VacancySoftConditions,
+)
 from src.services.embedding_text import (
     build_preference_search_text,
     build_preference_title_text,
@@ -27,25 +33,7 @@ from src.services.embedding_text import (
     soft_conditions,
 )
 from src.services.skill_canonicalization import SkillCanonicalizer
-
-SENIORITY_RANKS = {
-    "intern": 0,
-    "internship": 0,
-    "trainee": 0,
-    "junior": 1,
-    "middle": 2,
-    "mid": 2,
-    "senior": 3,
-    "lead": 4,
-    "principal": 5,
-}
-
-EXPERIENCE_MINIMUMS = {
-    "noexperience": 0.0,
-    "between1and3": 1.0,
-    "between3and6": 3.0,
-    "morethan6": 6.0,
-}
+from src.services.vacancy_preview import VacancyPreviewEvaluator
 
 
 class ScoringService:
@@ -74,33 +62,49 @@ class ScoringService:
         embedder: Embedder,
         skill_canonicalizer: SkillCanonicalizer,
         laya: LayaProvider,
+        evaluator: VacancyPreviewEvaluator,
     ) -> None:
         self._reranker = reranker
         self._embedder = embedder
         self._skills = skill_canonicalizer
         self._laya = laya
+        self._evaluator = evaluator
 
-    async def update_preference_embeddings(
-        self,
-        preferences: list[PreferenceIntent],
-    ) -> None:
-        if not preferences:
-            return
+    def embedding_texts(self, entity: Vacancy | PreferenceIntent) -> list[str]:
+        if isinstance(entity, PreferenceIntent):
+            return [
+                "Instruct: Given a job search query, retrieve relevant job vacancies"
+                f"\nQuery: {text}"
+                for text in (
+                    build_preference_title_text(entity),
+                    build_preference_search_text(entity),
+                )
+            ]
+        return [entity.title, f"{entity.title}\n{build_vacancy_search_text(entity)}"]
 
-        texts = [
-            "Instruct: Given a job search query, retrieve relevant job vacancies"
-            f"\nQuery: {text}"
-            for preference in preferences
-            for text in (
-                build_preference_title_text(preference),
-                build_preference_search_text(preference),
-            )
+    def embedding_fingerprint(self, entity: Vacancy | PreferenceIntent) -> str:
+        return hashlib.sha256(
+            repr((self._embedder.model_name, self.embedding_texts(entity))).encode()
+        ).hexdigest()
+
+    async def embed_entities(self, entities: list) -> dict:
+        stale = [
+            entity
+            for entity in entities
+            if entity.title_embedding is None
+            or entity.content_embedding is None
+            or entity.embedding_fingerprint != self.embedding_fingerprint(entity)
         ]
-        vectors = await self._embedder.embed(texts)
-
-        for index, preference in enumerate(preferences):
-            preference.title_embedding = vectors[index * 2]
-            preference.content_embedding = vectors[index * 2 + 1]
+        if not stale:
+            return {}
+        vectors = await self._embedder.embed(
+            [text for entity in stale for text in self.embedding_texts(entity)]
+        )
+        pairs = zip(vectors[::2], vectors[1::2], strict=True)
+        return {
+            entity.id: (title, content, self.embedding_fingerprint(entity))
+            for entity, (title, content) in zip(stale, pairs, strict=True)
+        }
 
     def compare_profile(
         self,
@@ -151,27 +155,8 @@ class ScoringService:
     ) -> PreferenceComparison:
         soft = VacancySoftConditions.model_validate(vacancy.soft_conditions)
         components: dict[str, float] = {}
-        vacancy_title = self._normalize_text(vacancy.title)
-        company = self._normalize_text(vacancy.company_name)
-
-        excluded_title = any(
-            normalized in vacancy_title
-            for value in preference.excluded_titles
-            if (normalized := self._normalize_text(value))
-        )
-        excluded_company = company and any(
-            normalized == company
-            for value in preference.excluded_companies
-            if (normalized := self._normalize_text(value))
-        )
-        salary_failed = (
-            preference.salary_min is not None
-            and vacancy.salary_to is not None
-            and vacancy.salary_to < preference.salary_min
-            and self._same_currency(preference, vacancy)
-        )
-        hard_constraints_passed = not (
-            excluded_title or excluded_company or salary_failed
+        hard_constraints_passed = self._evaluator.matches_preference(
+            VacancyPreview.model_validate(vacancy), preference
         )
 
         if preference.target_titles:
@@ -247,53 +232,6 @@ class ScoringService:
             components=components,
         )
 
-    def select_preference(
-        self,
-        vacancy: Vacancy,
-        preferences: list[PreferenceIntent],
-    ) -> tuple[PreferenceIntent, PreferenceComparison]:
-        enabled = [preference for preference in preferences if preference.enabled]
-        if not enabled:
-            raise ValueError("At least one enabled preference intent is required")
-
-        valid: dict[PreferenceIntent, PreferenceComparison] = {}
-        for preference in enabled:
-            comparison = self.compare_preference(
-                preference,
-                vacancy,
-            )
-            if comparison.hard_constraints_passed:
-                valid[preference] = comparison
-
-        def selection_score(preference: PreferenceIntent) -> float:
-            structured = valid[preference].score
-            title_semantic = self._cosine_similarity(
-                preference.title_embedding,
-                vacancy.title_embedding,
-            )
-            content_semantic = self._cosine_similarity(
-                preference.content_embedding,
-                vacancy.content_embedding,
-            )
-            semantic_components = {
-                name: score
-                for name, score in (
-                    ("title", title_semantic),
-                    ("content", content_semantic),
-                )
-                if score is not None
-            }
-            if semantic_components:
-                semantic = self._weighted_average(
-                    semantic_components,
-                    {"title": 0.60, "content": 0.40},
-                )
-                return (semantic * 0.75 + structured * 0.25) * preference.weight
-            return structured * preference.weight
-
-        best_preference = max(valid.keys(), key=selection_score)
-        return (best_preference, valid[best_preference])
-
     async def laya_match_vacancies(
         self,
         profile: Profile,
@@ -342,18 +280,23 @@ class ScoringService:
             "target_role": build_preference_title_text(preference),
             "skills": profile.skills,
             "experience": profile.experience,
+            "summary": profile.profile_summary,
+            "seniority": profile.seniority,
+            "experience_years": profile.experience_years,
         }
 
         cond = soft_conditions(vacancy)
 
-        vacancy_state = {
-            "title": vacancy.title,
-            "description": vacancy.description,
-            "soft_conditions": cond.model_dump(mode="json"),
-            "requirements": cond.requirements,
-            "required_skills": cond.required_skills,
-            "preferred_skills": cond.preferred_skills,
-        }
+        vacancy_state = NormalizedVacancy.model_validate(
+            vacancy, from_attributes=True
+        ).model_dump(mode="json", exclude={"source", "external_id"})
+        vacancy_state.update(
+            {
+                "requirements": cond.requirements,
+                "required_skills": cond.required_skills,
+                "preferred_skills": cond.preferred_skills,
+            }
+        )
 
         return {
             "candidate": candidate_state,
@@ -536,19 +479,3 @@ class ScoringService:
         if not expected_words:
             return 0.0
         return len(expected_words & actual_words) / len(expected_words)
-
-    @staticmethod
-    def _cosine_similarity(
-        first: list[float] | None,
-        second: list[float] | None,
-    ) -> float | None:
-        if first is None or second is None or len(first) != len(second):
-            return None
-        first_norm = math.sqrt(sum(value * value for value in first))
-        second_norm = math.sqrt(sum(value * value for value in second))
-        if first_norm == 0 or second_norm == 0:
-            return None
-        cosine = sum(a * b for a, b in zip(first, second, strict=True)) / (
-            first_norm * second_norm
-        )
-        return min(1.0, max(0.0, cosine))

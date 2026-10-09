@@ -27,6 +27,12 @@ class ProfileRepositoryTests(unittest.IsolatedAsyncioTestCase):
             sql,
         )
         self.assertEqual(compiled.params["profile_id_1"], profile_id)
+        await repository.get_preferences_by_profile_id(profile_id, enabled_only=True)
+        statement = session.scalars.await_args.args[0]
+        self.assertIn(
+            "preference_intents.enabled IS true",
+            str(statement.compile(dialect=postgresql.dialect())),
+        )
 
 
 if __name__ == "__main__":

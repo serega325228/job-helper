@@ -5,6 +5,24 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
+SENIORITY_RANKS = {
+    "intern": 0,
+    "internship": 0,
+    "trainee": 0,
+    "junior": 1,
+    "middle": 2,
+    "mid": 2,
+    "senior": 3,
+    "lead": 4,
+    "principal": 5,
+}
+EXPERIENCE_MINIMUMS = {
+    "noexperience": 0.0,
+    "between1and3": 1.0,
+    "between3and6": 3.0,
+    "morethan6": 6.0,
+}
+
 
 class WorkFormat(StrEnum):
     ON_SITE = "on_site"
@@ -23,6 +41,7 @@ class EmploymentType(StrEnum):
 
 
 class PreviewStatus(StrEnum):
+    FAILED = "failed"
     PENDING_FILTER = "pending_filter"
     READY = "ready"
     REJECTED = "rejected"
@@ -36,6 +55,7 @@ class VacancyStatus(StrEnum):
 
 
 class ProcessingStatus(StrEnum):
+    FAILED = "failed"
     PENDING_SCRAPE = "pending_scrape"
     PENDING_PARSE = "pending_parse"
     PENDING_EMBEDDING = "pending_embedding"
@@ -48,11 +68,13 @@ class ProcessingStatus(StrEnum):
 
 
 class CollectionStatus(StrEnum):
+    FAILED = "failed"
     PENDING = "pending"
     COMPLETED = "completed"
 
 
 class BatchStatus(StrEnum):
+    FAILED = "failed"
     DETAILS = "details"
     PENDING_RERANK = "pending_rerank"
     PENDING_LAYA = "pending_laya"
@@ -113,6 +135,10 @@ class VacancyReference(BaseModel):
 class VacancyPreview(VacancyReference):
     model_config = ConfigDict(from_attributes=True)
     company_name: str | None = Field(default=None, max_length=500)
+    area_id: str | None = None
+    country: str | None = None
+    city: str | None = None
+    work_schedule: str | None = None
     location: str | None = None
     short_description: str | None = None
     work_format: WorkFormat | None = None

@@ -1,6 +1,5 @@
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from src.infrastructure.vacancy_sources.hh.client import HhApiClient
@@ -58,6 +57,7 @@ class HhVacancySource:
                     url=item["alternate_url"],
                     company_name=(item.get("employer") or {}).get("name"),
                     location=(item.get("area") or {}).get("name"),
+                    area_id=(item.get("area") or {}).get("id"),
                     short_description="\n".join(
                         value for value in snippet.values() if isinstance(value, str)
                     ),
@@ -69,43 +69,6 @@ class HhVacancySource:
                     salary_gross=salary.get("gross"),
                 )
             if page + 1 >= payload["pages"]:
-                break
-
-    async def search(
-        self,
-        query: VacancySearchQuery,
-    ) -> AsyncIterator[VacancyReference]:
-        page = 0
-
-        while True:
-            params: dict[str, Any] = {
-                "text": query.text,
-                "page": page,
-                "per_page": 100,
-            }
-            if query.area_ids:
-                params["area"] = query.area_ids
-            if query.experience:
-                params["experience"] = query.experience
-            if query.published_after is not None:
-                params["date_from"] = query.published_after.isoformat()
-
-            payload = await self._client.search_vacancies(
-                params,
-            )
-
-            for item in payload["items"]:
-                yield VacancyReference(
-                    source=self.source_name,
-                    external_id=item["id"],
-                    title=item["name"],
-                    url=item["alternate_url"],
-                    published_at=item.get("published_at"),
-                )
-
-            page += 1
-
-            if page >= payload["pages"]:
                 break
 
     async def fetch_details(

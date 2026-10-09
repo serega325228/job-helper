@@ -12,7 +12,7 @@ from src.schemas.vacancy import (
     PreviewStatus,
     ProcessingStatus,
 )
-from src.services.vacancy import VacancyService
+from src.services.vacancy import VacancyRecoveryService, VacancyService
 from src.services.vacancy_match import VacancyMatchService
 from src.services.vacancy_preview import VacancyPreviewService
 from src.services.vacancy_scraping import VacancyScrapingService
@@ -23,9 +23,14 @@ settings = get_settings()
 @broker.task(ack_type="when_executed", queue_name=settings.taskiq.io_queue)
 @inject(patch_module=True)
 async def collect_previews(
-    collection_id: UUID, service: FromDishka[VacancyScrapingService]
+    collection_id: UUID,
+    service: FromDishka[VacancyScrapingService],
+    settings: FromDishka[Settings],
 ) -> None:
-    await service.collect_previews(collection_id, filter_previews.kiq)
+    preview_ids = await service.collect_previews(collection_id)
+    size = settings.scraping.preview_batch_size
+    for offset in range(0, len(preview_ids), size):
+        await filter_previews.kiq(preview_ids[offset : offset + size])
 
 
 @broker.task(ack_type="when_executed", queue_name=settings.taskiq.io_queue)
@@ -64,10 +69,9 @@ async def parse_vacancies(
 @inject(patch_module=True)
 async def score_embeddings(
     batch_id: UUID,
-    service: FromDishka[VacancyService],
     matching: FromDishka[VacancyMatchService],
 ) -> None:
-    if await matching.score_embeddings(batch_id, service):
+    if await matching.score_embeddings(batch_id):
         await rerank_vacancies.kiq(batch_id)
 
 
@@ -108,7 +112,7 @@ async def save_vacancy_scores(
 )
 @inject(patch_module=True)
 async def reconcile_processing(
-    service: FromDishka[VacancyService], settings: FromDishka[Settings]
+    service: FromDishka[VacancyRecoveryService], settings: FromDishka[Settings]
 ) -> None:
     claimed = await service.claim_stale_processing(settings)
     tasks = {
@@ -122,7 +126,7 @@ async def reconcile_processing(
         BatchStatus.PENDING_SAVE: save_vacancy_scores,
     }
     batch_sizes = {
-        PreviewStatus.PENDING_FILTER: settings.scraping.laya_batch_size,
+        PreviewStatus.PENDING_FILTER: settings.scraping.preview_batch_size,
         ProcessingStatus.PENDING_SCRAPE: settings.scraping.max_detail_pages,
         ProcessingStatus.PENDING_PARSE: settings.scraping.normalization_batch_size,
     }

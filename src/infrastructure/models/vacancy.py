@@ -65,6 +65,11 @@ class Vacancy(Base):
         Vector(EMBEDDING_DIMENSIONS),
     )
 
+    embedding_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    processing_token: Mapped[UUID | None]
+    attempts: Mapped[int] = mapped_column(default=0)
+    error: Mapped[str | None] = mapped_column(Text)
+
     status: Mapped[VacancyStatus] = mapped_column(
         Enum(
             VacancyStatus,
@@ -76,9 +81,6 @@ class Vacancy(Base):
         index=True,
     )
     preview_id: Mapped[UUID | None] = mapped_column(ForeignKey("vacancy_previews.id"))
-    batch_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("vacancy_batches.id"), index=True
-    )
     processing_status: Mapped[ProcessingStatus] = mapped_column(
         Enum(
             ProcessingStatus,
@@ -154,6 +156,11 @@ class VacancyBatch(Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     profile_id: Mapped[UUID] = mapped_column(ForeignKey("profiles.id"))
+    vacancy_ids: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    selection_context: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    processing_token: Mapped[UUID | None]
+    attempts: Mapped[int] = mapped_column(default=0)
+    error: Mapped[str | None] = mapped_column(Text)
     preference_ids: Mapped[list[str]] = mapped_column(JSONB)
     hard_filters: Mapped[dict[str, Any]] = mapped_column(JSONB)
     search_limit: Mapped[int]

@@ -150,6 +150,9 @@ class TaskiqSettings(BaseSettings):
 
     io_queue: str = "io"
     laya_queue: str = "laya"
+    worker_queue: Literal["io", "laya"] = "io"
+    # ponytail: leases do not heartbeat during a model call; exceed its worst-case duration or add heartbeats.
+    lease_timeout_seconds: int = Field(default=3600, ge=60)
     stage_attempts: int = Field(default=3, ge=1)
     retry_delay_seconds: float = Field(default=5, gt=0)
     stale_timeout_seconds: int = Field(default=900, ge=60)
@@ -263,6 +266,7 @@ class ScrapingSettings(BaseSettings):
     max_search_pages: int = Field(default=10, ge=1)
     max_previews: int = Field(default=250, ge=1)
     max_detail_pages: int = Field(default=50, ge=1)
+    preview_batch_size: int = Field(default=32, ge=1)
     laya_batch_size: int = Field(default=32, ge=1)
     normalization_batch_size: int = Field(default=5, ge=1)
 

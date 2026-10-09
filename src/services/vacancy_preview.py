@@ -1,8 +1,8 @@
 import re
+from datetime import UTC, datetime
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
-from src.config.settings import Settings
 from src.exceptions.profile import ProfileNotFoundError
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.models.preference_intent import PreferenceIntent
@@ -10,18 +10,21 @@ from src.infrastructure.models.profile import Profile
 from src.infrastructure.models.vacancy import VacancyBatch
 from src.infrastructure.models.vacancy_preview import PreviewCollection
 from src.schemas.vacancy import (
-    BatchStatus,
+    EXPERIENCE_MINIMUMS,
+    SENIORITY_RANKS,
+    CollectionStatus,
     PreviewCollectionRequest,
+    PreviewResponse,
     PreviewSelectionRequest,
     PreviewStatus,
     ProcessingStatus,
     VacancyHardFilters,
     VacancyPreview,
     VacancyScrapingQuery,
+    VacancyStatus,
     WorkFormat,
 )
 from src.services.improver import ImproverService
-from src.services.scoring import EXPERIENCE_MINIMUMS, SENIORITY_RANKS
 
 
 def _normalize(value: str | None) -> str:
@@ -65,7 +68,7 @@ class VacancyPreviewEvaluator:
     ) -> bool:
         if filters.sources and preview.source not in filters.sources:
             return False
-        if filters.statuses and "active" not in filters.statuses:
+        if filters.statuses and VacancyStatus.ACTIVE not in filters.statuses:
             return False
 
         for expected, actual in (
@@ -73,6 +76,10 @@ class VacancyPreviewEvaluator:
             (filters.work_formats, preview.work_format),
             (filters.employment_types, preview.employment_type),
             (filters.experience, preview.experience),
+            (filters.area_ids, preview.area_id),
+            (filters.cities, preview.city),
+            (filters.countries, preview.country),
+            (filters.work_schedules, preview.work_schedule),
         ):
             if (
                 expected
@@ -85,16 +92,6 @@ class VacancyPreviewEvaluator:
             filters.excluded_company_names,
         ):
             return False
-
-        for locations in (filters.cities, filters.countries):
-            if (
-                locations
-                and preview.location
-                and not any(
-                    _contains(location, preview.location) for location in locations
-                )
-            ):
-                return False
 
         rank = _seniority_rank(preview.seniority or preview.title)
         allowed_ranks = [_seniority_rank(value) for value in filters.seniorities]
@@ -139,7 +136,7 @@ class VacancyPreviewEvaluator:
             return self.relevant(preview, [], query)
         return any(
             preference.enabled
-            and self._matches_preference(preview, preference)
+            and self.matches_preference(preview, preference)
             and self.relevant(preview, [preference], query)
             for preference in preferences
         )
@@ -169,7 +166,7 @@ class VacancyPreviewEvaluator:
             and preview.salary_to < minimum
         )
 
-    def _matches_preference(
+    def matches_preference(
         self,
         preview: VacancyPreview,
         preference: PreferenceIntent,
@@ -193,10 +190,12 @@ class VacancyPreviewEvaluator:
                 return False
         if (
             preference.locations
-            and preview.location
+            and preview.city
+            and preview.country
             and preview.work_format in {WorkFormat.ON_SITE, WorkFormat.HYBRID}
             and not any(
-                _contains(location, preview.location)
+                _normalize(location)
+                in {_normalize(preview.city), _normalize(preview.country)}
                 for location in preference.locations
             )
         ):
@@ -260,11 +259,9 @@ class VacancyPreviewService:
         self,
         unit_of_work: SqlAlchemyUnitOfWork,
         evaluator: VacancyPreviewEvaluator,
-        settings: Settings,
     ) -> None:
         self._uow = unit_of_work
         self._evaluator = evaluator
-        self._settings = settings
 
     async def prepare_collections(
         self, request: PreviewCollectionRequest, sources: dict
@@ -278,10 +275,9 @@ class VacancyPreviewService:
             preferences = [
                 preference
                 for preference in await uow.profiles.get_preferences_by_profile_id(
-                    request.profile_id
+                    request.profile_id, enabled_only=True
                 )
-                if preference.enabled
-                and (
+                if (
                     request.preferences == ["all"]
                     or preference.name in request.preferences
                 )
@@ -340,71 +336,114 @@ class VacancyPreviewService:
 
     async def list_previews(self, profile_id: UUID, limit: int) -> list:
         async with self._uow as uow:
-            return await uow.previews.list_for_profile(profile_id, limit)
+            return [
+                PreviewResponse(
+                    **VacancyPreview.model_validate(preview).model_dump(),
+                    id=collected.id,
+                    status=collected.status,
+                )
+                for collected, preview in await uow.previews.get_collected(
+                    profile_id=profile_id, limit=limit
+                )
+            ]
 
     async def save_scraped(
-        self, collection_id: UUID, previews: list[VacancyPreview]
+        self, collection_id: UUID, previews: list[VacancyPreview], token: UUID
     ) -> list[UUID]:
         async with self._uow as uow:
-            collection = await uow.previews.get_collection(collection_id)
-            if collection is None:
-                raise ValueError("Preview collection is missing")
+            collection = await uow.previews.get_collection(collection_id, lock=True)
+            if (
+                collection is None
+                or collection.processing_token != token
+                or collection.status != CollectionStatus.PENDING
+            ):
+                return []
             if any(preview.source != collection.source for preview in previews):
                 raise ValueError("Preview source does not match its collection")
+            collection.updated_at = datetime.now(UTC)
             saved = await uow.previews.save_new(collection_id, previews)
-        return [preview.id for preview in saved]
+        return saved
 
     async def filter_previews(self, preview_ids: list[UUID]) -> None:
         async with self._uow as uow:
-            previews = [
-                preview
-                for preview in await uow.previews.get_by_ids(preview_ids, lock=True)
-                if preview.status == PreviewStatus.PENDING_FILTER
-            ]
-            groups: dict[UUID, list] = {}
-            for preview in previews:
-                groups.setdefault(preview.collection_id, []).append(preview)
+            groups = {}
+            for collected, preview in await uow.previews.get_collected(
+                ids=preview_ids, status=PreviewStatus.PENDING_FILTER, lock=True
+            ):
+                groups.setdefault(collected.collection_id, []).append(
+                    (collected, preview)
+                )
             for collection_id, group in groups.items():
                 collection = await uow.previews.get_collection(collection_id)
                 profile = await uow.profiles.get_by_id(collection.profile_id)
-                if profile is None:
-                    raise ProfileNotFoundError(collection.profile_id)
+                try:
+                    preference_ids = [
+                        UUID(value) for value in collection.preference_ids
+                    ]
+                    query = VacancyScrapingQuery.model_validate(collection.query)
+                    filters = VacancyHardFilters.model_validate(collection.hard_filters)
+                except ValueError as error:
+                    for collected, _ in group:
+                        collected.status = PreviewStatus.FAILED
+                        collected.error = str(error)
+                    continue
                 preferences = await uow.profiles.get_preferences_by_ids(
                     collection.profile_id,
-                    [UUID(value) for value in collection.preference_ids],
+                    preference_ids,
+                    enabled_only=True,
                 )
-                preferences = [
-                    preference for preference in preferences if preference.enabled
-                ]
-                query = VacancyScrapingQuery.model_validate(collection.query)
-                filters = VacancyHardFilters.model_validate(collection.hard_filters)
-                for preview in group:
-                    data = VacancyPreview.model_validate(preview)
-                    preview.status = (
-                        PreviewStatus.READY
-                        if preferences
-                        and self._evaluator.accept(
-                            data, profile, preferences, filters, query
+                for collected, preview in group:
+                    try:
+                        if profile is None:
+                            raise ProfileNotFoundError(collection.profile_id)
+                        accepted = preferences and self._evaluator.accept(
+                            VacancyPreview.model_validate(preview),
+                            profile,
+                            preferences,
+                            filters,
+                            query,
                         )
-                        else PreviewStatus.REJECTED
-                    )
+                    except (
+                        ValueError,
+                        TypeError,
+                        AttributeError,
+                        ProfileNotFoundError,
+                    ) as error:
+                        collected.status = PreviewStatus.FAILED
+                        collected.error = str(error)
+                    else:
+                        collected.status = (
+                            PreviewStatus.READY if accepted else PreviewStatus.REJECTED
+                        )
+                        collected.error = None
 
     async def select_for_details(self, request: PreviewSelectionRequest) -> list[UUID]:
         async with self._uow as uow:
-            profile = await uow.profiles.get_by_id(request.profile_id)
+            profile = await uow.profiles.get_by_id(request.profile_id, lock=True)
             if profile is None:
                 raise ProfileNotFoundError(request.profile_id)
-            selected = []
-            preference_ids = set()
-            for preview in await uow.previews.list_ready(
-                request.profile_id, request.preview_ids
+            selected, preference_ids, collections = [], set(), {}
+            seen = set()
+            for collected, preview in await uow.previews.get_collected(
+                profile_id=request.profile_id,
+                ids=request.preview_ids,
+                status=PreviewStatus.READY,
+                lock=True,
             ):
-                collection = await uow.previews.get_collection(preview.collection_id)
-                preferences = await uow.profiles.get_preferences_by_ids(
-                    request.profile_id,
-                    [UUID(value) for value in collection.preference_ids],
-                )
-                if not self._evaluator.accept(
+                if preview.id in seen:
+                    continue
+                if collected.collection_id not in collections:
+                    collection = await uow.previews.get_collection(
+                        collected.collection_id
+                    )
+                    preferences = await uow.profiles.get_preferences_by_ids(
+                        request.profile_id,
+                        [UUID(value) for value in collection.preference_ids],
+                        enabled_only=True,
+                    )
+                    collections[collected.collection_id] = (collection, preferences)
+                collection, preferences = collections[collected.collection_id]
+                if not preferences or not self._evaluator.accept(
                     VacancyPreview.model_validate(preview),
                     profile,
                     preferences,
@@ -412,29 +451,17 @@ class VacancyPreviewService:
                     VacancyScrapingQuery.model_validate(collection.query),
                 ):
                     continue
-                selected.append(preview)
-                preference_ids.update(collection.preference_ids)
-                if len(selected) >= min(
-                    request.limit, self._settings.scraping.max_detail_pages
-                ):
+                selected.append((collected, preview))
+                seen.add(preview.id)
+                preference_ids.update(str(preference.id) for preference in preferences)
+                if len(selected) >= request.limit:
                     break
             if not selected:
                 return []
-            batch = VacancyBatch(
-                profile_id=request.profile_id,
-                preference_ids=sorted(preference_ids),
-                hard_filters=request.hard_filters.model_dump(mode="json"),
-                search_limit=request.search_limit,
-                rerank_limit=request.rerank_limit,
-                title_weight=request.title_weight,
-            )
-            uow.vacancies.add_batch(batch)
-            await uow.flush()
             vacancies = await uow.vacancies.create_from_previews(
                 [
                     {
                         "preview_id": preview.id,
-                        "batch_id": batch.id,
                         "source": preview.source,
                         "external_id": preview.external_id,
                         "url": preview.url,
@@ -445,11 +472,53 @@ class VacancyPreviewService:
                         "description": "",
                         "processing_status": ProcessingStatus.PENDING_SCRAPE,
                     }
-                    for preview in selected
+                    for _, preview in selected
                 ]
             )
-            for preview in selected:
-                preview.status = PreviewStatus.SELECTED
+            busy = await uow.vacancies.busy_vacancy_ids(request.profile_id)
+            vacancies = [
+                vacancy
+                for vacancy in vacancies
+                if vacancy.id not in busy
+                and vacancy.processing_status
+                not in {ProcessingStatus.FAILED, ProcessingStatus.REMOVED}
+            ]
             if not vacancies:
-                batch.status = BatchStatus.COMPLETED
+                return []
+            by_key = {
+                (vacancy.source, vacancy.external_id): vacancy for vacancy in vacancies
+            }
+            context = {}
+            for collected, preview in selected:
+                key = (preview.source, preview.external_id)
+                if key not in by_key:
+                    continue
+                collection, preferences = collections[collected.collection_id]
+                scope = context.setdefault(
+                    str(collection.id),
+                    {
+                        "vacancy_ids": [],
+                        "preference_ids": [
+                            str(preference.id) for preference in preferences
+                        ],
+                        "hard_filters": collection.hard_filters,
+                    },
+                )
+                scope["vacancy_ids"].append(str(by_key[key].id))
+            batch = VacancyBatch(
+                selection_context=context,
+                profile_id=request.profile_id,
+                vacancy_ids=[str(vacancy.id) for vacancy in vacancies],
+                preference_ids=sorted(preference_ids),
+                hard_filters=request.hard_filters.model_dump(mode="json"),
+                search_limit=request.search_limit,
+                rerank_limit=request.rerank_limit,
+                title_weight=request.title_weight,
+            )
+            uow.vacancies.add_batch(batch)
+            keys = {(vacancy.source, vacancy.external_id) for vacancy in vacancies}
+            for collected, preview in selected:
+                if (preview.source, preview.external_id) in keys:
+                    collected.status = PreviewStatus.SELECTED
+            await uow.flush()
         return [vacancy.id for vacancy in vacancies]

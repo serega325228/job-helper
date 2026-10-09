@@ -36,6 +36,10 @@ class PreviewCollection(Base):
         onupdate=lambda: datetime.now(UTC),
     )
 
+    processing_token: Mapped[UUID | None]
+    attempts: Mapped[int] = mapped_column(default=0)
+    error: Mapped[str | None] = mapped_column(Text)
+
     __table_args__ = (Index("ix_preview_collections_recovery", "status", "updated_at"),)
 
 
@@ -43,9 +47,6 @@ class VacancyPreview(Base):
     __tablename__ = "vacancy_previews"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    collection_id: Mapped[UUID] = mapped_column(
-        ForeignKey("preview_collections.id"), index=True
-    )
     source: Mapped[str] = mapped_column(String(50))
     external_id: Mapped[str] = mapped_column(String(500))
     url: Mapped[str] = mapped_column(Text)
@@ -53,6 +54,10 @@ class VacancyPreview(Base):
     company_name: Mapped[str | None] = mapped_column(String(500))
     normalized_company: Mapped[str | None] = mapped_column(Text)
     normalized_title: Mapped[str] = mapped_column(Text)
+    area_id: Mapped[str | None] = mapped_column(String(100))
+    country: Mapped[str | None] = mapped_column(String(255))
+    city: Mapped[str | None] = mapped_column(String(255))
+    work_schedule: Mapped[str | None] = mapped_column(String(100))
     location: Mapped[str | None] = mapped_column(Text)
     short_description: Mapped[str | None] = mapped_column(Text)
     work_format: Mapped[str | None] = mapped_column(String(50))
@@ -64,14 +69,6 @@ class VacancyPreview(Base):
     salary_to: Mapped[int | None]
     salary_currency: Mapped[str | None] = mapped_column(String(10))
     salary_gross: Mapped[bool | None]
-    status: Mapped[PreviewStatus] = mapped_column(
-        Enum(
-            PreviewStatus,
-            native_enum=False,
-            values_callable=lambda enum: [item.value for item in enum],
-        ),
-        index=True,
-    )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     discovered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
@@ -92,5 +89,34 @@ class VacancyPreview(Base):
             "normalized_title",
             "discovered_at",
         ),
-        Index("ix_vacancy_previews_recovery", "status", "updated_at"),
+    )
+
+
+class CollectedPreview(Base):
+    __tablename__ = "collected_previews"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    error: Mapped[str | None] = mapped_column(Text)
+    collection_id: Mapped[UUID] = mapped_column(ForeignKey("preview_collections.id"))
+    preview_id: Mapped[UUID] = mapped_column(ForeignKey("vacancy_previews.id"))
+    status: Mapped[PreviewStatus] = mapped_column(
+        Enum(
+            PreviewStatus,
+            native_enum=False,
+            values_callable=lambda enum: [item.value for item in enum],
+        ),
+        default=PreviewStatus.PENDING_FILTER,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+    __table_args__ = (
+        UniqueConstraint(
+            "collection_id",
+            "preview_id",
+            name="uq_collected_previews_collection_preview",
+        ),
+        Index("ix_collected_previews_recovery", "status", "updated_at"),
     )

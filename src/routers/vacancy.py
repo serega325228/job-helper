@@ -3,6 +3,7 @@ from uuid import UUID
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
 
+from src.config.settings import Settings
 from src.exceptions.profile import ProfileNotFoundError
 from src.exceptions.vacancy import VacancyScrapingError
 from src.infrastructure.vacancy_sources.hh.source import HhVacancySource
@@ -52,7 +53,9 @@ async def list_previews(
 @router.post("/process", status_code=202)
 @inject
 async def process(
-    request: PreviewSelectionRequest, service: FromDishka[VacancyPreviewService]
+    request: PreviewSelectionRequest,
+    service: FromDishka[VacancyPreviewService],
+    settings: FromDishka[Settings],
 ) -> dict[str, list[UUID]]:
     try:
         vacancy_ids = await service.select_for_details(request)
@@ -60,6 +63,7 @@ async def process(
         raise HTTPException(status_code=404, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    if vacancy_ids:
-        await scrape_details.kiq(vacancy_ids)
+    size = settings.scraping.max_detail_pages
+    for offset in range(0, len(vacancy_ids), size):
+        await scrape_details.kiq(vacancy_ids[offset : offset + size])
     return {"vacancy_ids": vacancy_ids}

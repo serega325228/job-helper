@@ -13,6 +13,7 @@ from src.services.embedding_text import (
 )
 from src.services.scoring import ScoringService
 from src.services.skill_canonicalization import SkillCanonicalizer
+from src.services.vacancy_preview import VacancyPreviewEvaluator
 
 
 class FakeReranker:
@@ -111,6 +112,7 @@ class ScoringServiceTests(unittest.IsolatedAsyncioTestCase):
             FakeEmbeddingService(),
             SkillCanonicalizer(),
             self.laya,
+            VacancyPreviewEvaluator(),
         )
 
     async def test_laya_pairs_each_vacancy_with_its_preference(self) -> None:
@@ -231,7 +233,12 @@ class ScoringServiceTests(unittest.IsolatedAsyncioTestCase):
         preference.content_embedding = None
         preference.title_embedding = None
 
-        await self.service.update_preference_embeddings([preference])
+        vectors = await self.service.embed_entities([preference])
+        (
+            preference.title_embedding,
+            preference.content_embedding,
+            preference.embedding_fingerprint,
+        ) = vectors[preference.id]
         self.assertEqual(
             self.service._embedder.texts[0],
             "Instruct: Given a job search query, retrieve relevant job vacancies"
@@ -240,6 +247,9 @@ class ScoringServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(preference.title_embedding, [1.0, 0.0])
         self.assertEqual(preference.content_embedding, [1.0, 1.0])
+        self.assertEqual(await self.service.embed_entities([preference]), {})
+        preference.description = "New target"
+        self.assertIn(preference.id, await self.service.embed_entities([preference]))
 
 
 if __name__ == "__main__":

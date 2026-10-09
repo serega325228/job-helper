@@ -163,19 +163,21 @@ class VacancyPreviewTest(unittest.TestCase):
     def test_remote_preference_preserves_location_unknowns_but_explicit_geo_filters_apply(
         self,
     ):
-        vacancy = preview(location="Berlin", work_format=WorkFormat.REMOTE)
+        vacancy = preview(city="Berlin", work_format=WorkFormat.REMOTE)
         preferences = [preference(locations=["London"])]
         self.assertTrue(self.accept(vacancy, preferences))
         self.assertTrue(self.accept(preview(location="Berlin"), preferences))
         self.assertFalse(
             self.accept(
-                preview(location="Berlin", work_format=WorkFormat.ON_SITE), preferences
+                preview(
+                    city="Berlin", country="Germany", work_format=WorkFormat.ON_SITE
+                ),
+                preferences,
             )
         )
         self.assertFalse(self.accept(vacancy, preferences, cities=["London"]))
-        self.assertFalse(
-            self.accept(preview(location="New York"), cities=["Yorkshire"])
-        )
+        self.assertFalse(self.accept(preview(city="New York"), cities=["Yorkshire"]))
+        self.assertTrue(self.accept(preview(location="Moscow"), countries=["Russia"]))
 
     def test_partial_ai_preview_survives_but_explicit_contradictions_do_not(self):
         preferences = [

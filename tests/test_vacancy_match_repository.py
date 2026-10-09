@@ -27,13 +27,12 @@ class VacancyMatchRepositoryTests(unittest.IsolatedAsyncioTestCase):
         repository = VacancyMatchRepository(session)
         profile_id = uuid4()
 
-        result = await repository.search_by_preferences(
+        result = await repository.embedding_scores(
             profile_id,
             VacancyHardFilters(cities=["Москва"], work_formats=["remote"]),
-            limit=50,
+            vacancy_ids=[vacancy_id],
+            preference_ids=[preference_id],
             title_weight=0.4,
-            candidate_limit=100,
-            per_preference_limit=40,
         )
 
         self.assertEqual(result[0].vacancy_id, vacancy_id)
@@ -41,33 +40,13 @@ class VacancyMatchRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result[0].combined_similarity, 0.78)
         statement = session.execute.await_args.args[0]
         sql = str(statement.compile(dialect=postgresql.dialect()))
-        self.assertEqual(sql.count("vacancies.city IN"), 2)
-        self.assertEqual(sql.count("vacancies.work_format IN"), 2)
-        self.assertEqual(sql.count("vacancies.status IN"), 2)
-        self.assertIn("JOIN LATERAL", sql)
-        self.assertIn("UNION", sql)
-        self.assertIn("ORDER BY vacancies.title_embedding <=>", sql)
-        self.assertIn("ORDER BY vacancies.content_embedding <=>", sql)
-        self.assertNotIn("vacancies.id IN", sql)
-        self.assertIn("row_number() OVER", sql)
-
-    async def test_validates_lateral_search_limits(self) -> None:
-        repository = VacancyMatchRepository(AsyncMock())
-        profile_id = uuid4()
-        filters = VacancyHardFilters()
-
-        with self.assertRaises(ValueError):
-            await repository.search_by_preferences(
-                profile_id,
-                filters,
-                candidate_limit=0,
-            )
-        with self.assertRaises(ValueError):
-            await repository.search_by_preferences(
-                profile_id,
-                filters,
-                per_preference_limit=0,
-            )
+        self.assertEqual(sql.count("vacancies.city IN"), 1)
+        self.assertEqual(sql.count("vacancies.work_format IN"), 1)
+        self.assertEqual(sql.count("vacancies.status IN"), 1)
+        self.assertNotIn("LATERAL", sql)
+        self.assertNotIn("UNION", sql)
+        self.assertIn("vacancies.id IN", sql)
+        self.assertIn("preference_intents.id IN", sql)
 
 
 if __name__ == "__main__":

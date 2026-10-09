@@ -181,6 +181,7 @@ class LinkedInVacancySourceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_scroll_growth_does_not_click_another_page(self) -> None:
         page = fake_page(SEARCH_HTML)
+        page.get_by_role.return_value.count.return_value = 0
         page.content.side_effect = [
             SEARCH_HTML,
             SEARCH_HTML.replace("</ul>", '<li><div class="base-card"></div></li></ul>'),

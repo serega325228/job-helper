@@ -5,10 +5,15 @@ from src.infrastructure.models.profile import Profile
 from src.infrastructure.models.resume import Resume
 from src.infrastructure.models.vacancy import Vacancy, VacancyBatch
 from src.infrastructure.models.vacancy_match import VacancyMatch
-from src.infrastructure.models.vacancy_preview import PreviewCollection, VacancyPreview
+from src.infrastructure.models.vacancy_preview import (
+    CollectedPreview,
+    PreviewCollection,
+    VacancyPreview,
+)
 
 __all__ = [
     "Base",
+    "CollectedPreview",
     "Company",
     "PreferenceIntent",
     "PreviewCollection",

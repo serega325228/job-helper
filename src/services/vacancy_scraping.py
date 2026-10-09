@@ -1,12 +1,14 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
-from uuid import UUID
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
 
 import httpx
 from crawlee import Request
 from crawlee.crawlers import PlaywrightCrawler, PlaywrightCrawlingContext
 
+from src.config.settings import Settings
 from src.exceptions.vacancy import VacancyNormalizationError, VacancyScrapingError
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.vacancy_sources.hh.source import HhVacancySource
@@ -14,6 +16,7 @@ from src.infrastructure.vacancy_sources.linkedin.source import LinkedInVacancySo
 from src.ports.browser_vacancy_source import BrowserVacancySource
 from src.schemas.vacancy import (
     CollectionStatus,
+    PreviewStatus,
     ProcessingStatus,
     RawVacancy,
     VacancyHardFilters,
@@ -24,9 +27,6 @@ from src.schemas.vacancy import (
 from src.services.vacancy_preview import VacancyPreviewService
 
 type CrawlerFactory = Callable[[], AbstractAsyncContextManager[PlaywrightCrawler]]
-type PreviewServiceFactory = Callable[
-    [], AbstractAsyncContextManager[VacancyPreviewService]
-]
 
 
 class VacancyScrapingService:
@@ -34,7 +34,7 @@ class VacancyScrapingService:
         self,
         crawler_factory: CrawlerFactory,
         unit_of_work: SqlAlchemyUnitOfWork,
-        preview_service_factory: PreviewServiceFactory,
+        previews: VacancyPreviewService,
         hh: HhVacancySource,
         linkedin: LinkedInVacancySource,
         *,
@@ -42,32 +42,55 @@ class VacancyScrapingService:
         max_previews: int,
         batch_size: int,
         concurrency: int,
+        settings: Settings,
     ) -> None:
         self._crawler_factory = crawler_factory
         self._uow = unit_of_work
-        self._preview_service_factory = preview_service_factory
+        self._previews = previews
+        self._settings = settings
         self._sources = {"hh": hh, "linkedin": linkedin}
         self._max_search_pages = max_search_pages
         self._max_previews = max_previews
         self._batch_size = batch_size
         self._concurrency = concurrency
 
-    async def collect_previews(
-        self,
-        collection_id: UUID,
-        enqueue_filter: Callable[[list[UUID]], Awaitable[object]],
-    ) -> None:
+    async def collect_previews(self, collection_id: UUID) -> list[UUID]:
+        token = uuid4()
         async with self._uow as uow:
             collection = await uow.previews.get_collection(collection_id, lock=True)
-            if collection is None or collection.status != CollectionStatus.PENDING:
-                return
+            if collection is None or collection.status == CollectionStatus.FAILED:
+                return []
+            if collection.status == CollectionStatus.COMPLETED:
+                return [
+                    row.id
+                    for row, _ in await uow.previews.get_collected(
+                        collection_id=collection_id, status=PreviewStatus.PENDING_FILTER
+                    )
+                ]
+            cutoff = datetime.now(UTC) - timedelta(
+                seconds=self._settings.taskiq.lease_timeout_seconds
+            )
+            if (
+                collection.processing_token is not None
+                and collection.updated_at >= cutoff
+            ):
+                return []
+            if collection.attempts >= self._settings.taskiq.stage_attempts:
+                collection.status = CollectionStatus.FAILED
+                collection.error = "Stage attempts exhausted"
+                collection.processing_token = None
+                return []
+            collection.processing_token = token
+            collection.attempts += 1
+            collection.updated_at = datetime.now(UTC)
+        pending_ids = set()
 
-            async def save_batch(previews: list[VacancyPreview]) -> None:
-                async with self._preview_service_factory() as service:
-                    preview_ids = await service.save_scraped(collection.id, previews)
-                if preview_ids:
-                    await enqueue_filter(preview_ids)
+        async def save_batch(previews: list[VacancyPreview]) -> None:
+            pending_ids.update(
+                await self._previews.save_scraped(collection_id, previews, token)
+            )
 
+        try:
             await self.scrape_previews(
                 self._sources[collection.source],
                 collection.vacancy_page_url,
@@ -75,46 +98,92 @@ class VacancyScrapingService:
                 VacancyHardFilters.model_validate(collection.hard_filters),
                 save_batch,
             )
-            collection.status = CollectionStatus.COMPLETED
+            async with self._uow as uow:
+                row = await uow.previews.get_collection(collection_id, lock=True)
+                if row.processing_token != token:
+                    return []
+                row.status = CollectionStatus.COMPLETED
+                row.processing_token = None
+                row.attempts = 0
+                row.error = None
+        except Exception as error:
+            async with self._uow as uow:
+                row = await uow.previews.get_collection(collection_id, lock=True)
+                if row.processing_token == token:
+                    row.processing_token = None
+                    row.error = str(error)
+                    if (
+                        isinstance(error, ValueError)
+                        or row.attempts >= self._settings.taskiq.stage_attempts
+                    ):
+                        row.status = CollectionStatus.FAILED
+            raise
+        return sorted(pending_ids)
 
     async def process_details(
         self, vacancy_ids: list[UUID]
     ) -> tuple[list[UUID], set[UUID]]:
-        parsed_ids = []
-        batch_ids = set()
+        token = uuid4()
         async with self._uow as uow:
-            vacancies = await uow.vacancies.get_stage(
-                vacancy_ids, ProcessingStatus.PENDING_SCRAPE
+            vacancies = await uow.vacancies.claim_details(
+                vacancy_ids, ProcessingStatus.PENDING_SCRAPE, token, self._settings
             )
-            if not vacancies:
-                return parsed_ids, batch_ids
-            previews = {
-                preview.id: VacancyPreview.model_validate(preview)
-                for preview in await uow.previews.get_by_ids(
-                    [vacancy.preview_id for vacancy in vacancies]
-                )
-            }
-            for source_name in sorted({vacancy.source for vacancy in vacancies}):
-                group = [
-                    vacancy for vacancy in vacancies if vacancy.source == source_name
-                ]
-                raw_by_key = await self.scrape_details(
-                    self._sources[source_name],
-                    [previews[vacancy.preview_id] for vacancy in group],
-                )
-                for vacancy in group:
-                    batch_ids.add(vacancy.batch_id)
-                    raw = raw_by_key[(vacancy.source, vacancy.external_id)]
-                    if raw is None:
-                        vacancy.status = VacancyStatus.REMOVED
-                        vacancy.processing_status = ProcessingStatus.REMOVED
-                        continue
-                    vacancy.raw_document = raw.model_dump(mode="json")
-                    vacancy.raw_payload = raw.raw_payload
-                    vacancy.description = raw.raw_text or ""
-                    vacancy.processing_status = ProcessingStatus.PENDING_PARSE
-                    parsed_ids.append(vacancy.id)
-        return parsed_ids, batch_ids
+            rows = await uow.previews.get_by_ids(
+                [vacancy.preview_id for vacancy in vacancies]
+            )
+        claimed_ids = [vacancy.id for vacancy in vacancies]
+        if vacancies:
+            try:
+                previews = {
+                    preview.id: VacancyPreview.model_validate(preview)
+                    for preview in rows
+                }
+                values = {}
+                for source_name in sorted({vacancy.source for vacancy in vacancies}):
+                    group = [
+                        vacancy
+                        for vacancy in vacancies
+                        if vacancy.source == source_name
+                    ]
+                    raw_by_key = await self.scrape_details(
+                        self._sources[source_name],
+                        [previews[vacancy.preview_id] for vacancy in group],
+                    )
+                    for vacancy in group:
+                        raw = raw_by_key[(vacancy.source, vacancy.external_id)]
+                        values[vacancy.id] = (
+                            {
+                                "status": VacancyStatus.REMOVED,
+                                "processing_status": ProcessingStatus.REMOVED,
+                            }
+                            if raw is None
+                            else {
+                                "raw_document": raw.model_dump(mode="json"),
+                                "raw_payload": raw.raw_payload,
+                                "description": raw.raw_text or "",
+                                "processing_status": ProcessingStatus.PENDING_PARSE,
+                            }
+                        )
+                async with self._uow as uow:
+                    await uow.vacancies.finish_details(values, token)
+            except Exception as error:
+                async with self._uow as uow:
+                    await uow.vacancies.fail_details(
+                        claimed_ids,
+                        token,
+                        error,
+                        self._settings,
+                    )
+                raise
+        async with self._uow as uow:
+            rows = await uow.vacancies.get_vacancies_by_ids(vacancy_ids)
+            parsed_ids = [
+                row.id
+                for row in rows
+                if row.processing_status == ProcessingStatus.PENDING_PARSE
+            ]
+            ready = await uow.vacancies.ready_batch_ids(vacancy_ids)
+        return parsed_ids, ready
 
     async def scrape_previews(
         self,

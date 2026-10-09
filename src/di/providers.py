@@ -11,7 +11,7 @@ from crawlee.configuration import Configuration
 from crawlee.crawlers._playwright import PlaywrightCrawler
 from crawlee.events import LocalEventManager
 from crawlee.storage_clients._file_system import FileSystemStorageClient
-from dishka import AsyncContainer, FromComponent, Provider, Scope, provide
+from dishka import FromComponent, Provider, Scope, provide
 from playwright.async_api import Playwright, async_playwright
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -50,12 +50,11 @@ from src.services.refiner import RefinerService
 from src.services.scoring import ScoringService
 from src.services.sercurity import SecurityService
 from src.services.skill_canonicalization import SkillCanonicalizer
-from src.services.vacancy import VacancyService
+from src.services.vacancy import VacancyRecoveryService, VacancyService
 from src.services.vacancy_match import VacancyMatchService
 from src.services.vacancy_preview import VacancyPreviewEvaluator, VacancyPreviewService
 from src.services.vacancy_scraping import (
     CrawlerFactory,
-    PreviewServiceFactory,
     VacancyScrapingService,
 )
 
@@ -300,27 +299,17 @@ class ServiceProvider(Provider):
     interview_prep_service = provide(InterviewPrepService, scope=Scope.REQUEST)
     profile_service = provide(ProfileService, scope=Scope.REQUEST)
     vacancy_service = provide(VacancyService, scope=Scope.REQUEST)
+    vacancy_recovery_service = provide(VacancyRecoveryService, scope=Scope.REQUEST)
     vacancy_preview_evaluator = provide(VacancyPreviewEvaluator, scope=Scope.APP)
     vacancy_preview_service = provide(VacancyPreviewService, scope=Scope.REQUEST)
     vacancy_match_service = provide(VacancyMatchService, scope=Scope.REQUEST)
-
-    @provide(scope=Scope.APP)
-    def preview_service_factory(
-        self, container: AsyncContainer
-    ) -> PreviewServiceFactory:
-        @asynccontextmanager
-        async def open_preview_service() -> AsyncGenerator[VacancyPreviewService]:
-            async with container() as scope:
-                yield await scope.get(VacancyPreviewService)
-
-        return open_preview_service
 
     @provide(scope=Scope.REQUEST)
     def vacancy_scraping_service(
         self,
         crawler_factory: CrawlerFactory,
         unit_of_work: SqlAlchemyUnitOfWork,
-        preview_service_factory: PreviewServiceFactory,
+        previews: VacancyPreviewService,
         hh: HhVacancySource,
         linkedin: LinkedInVacancySource,
         settings: Settings,
@@ -328,13 +317,14 @@ class ServiceProvider(Provider):
         return VacancyScrapingService(
             crawler_factory,
             unit_of_work,
-            preview_service_factory,
+            previews,
             hh,
             linkedin,
             max_search_pages=settings.scraping.max_search_pages,
             max_previews=settings.scraping.max_previews,
-            batch_size=settings.scraping.laya_batch_size,
+            batch_size=settings.scraping.preview_batch_size,
             concurrency=settings.crawlee.desired_concurrency,
+            settings=settings,
         )
 
     @provide(scope=Scope.APP)
@@ -351,12 +341,14 @@ class ServiceProvider(Provider):
         embedder: Embedder,
         skill_canonicalizer: SkillCanonicalizer,
         laya: LayaProvider,
+        evaluator: VacancyPreviewEvaluator,
     ) -> ScoringService:
         return ScoringService(
             reranker,
             embedder,
             skill_canonicalizer,
             laya,
+            evaluator,
         )
 
     @provide(scope=Scope.REQUEST)

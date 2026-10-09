@@ -16,32 +16,44 @@ class ProfileRepository:
         await self._session.flush()
         return profile
 
-    async def get_by_id(self, id: UUID) -> Profile | None:
-        return await self._session.get(Profile, id)
+    async def get_by_id(self, id: UUID, *, lock: bool = False) -> Profile | None:
+        statement = select(Profile).where(Profile.id == id)
+        if lock:
+            statement = statement.with_for_update()
+        return await self._session.scalar(
+            statement.execution_options(populate_existing=True)
+        )
 
     async def get_preferences_by_profile_id(
         self,
         profile_id: UUID,
+        *,
+        enabled_only: bool = False,
     ) -> list[PreferenceIntent]:
         stmt = (
             select(PreferenceIntent)
             .where(PreferenceIntent.profile_id == profile_id)
             .order_by(PreferenceIntent.created_at, PreferenceIntent.id)
         )
-        result = await self._session.scalars(stmt)
+        if enabled_only:
+            stmt = stmt.where(PreferenceIntent.enabled.is_(True))
+        result = await self._session.scalars(
+            stmt.execution_options(populate_existing=True)
+        )
         return list(result)
 
     async def get_preferences_by_ids(
         self,
         profile_id: UUID,
         preference_ids: list[UUID],
+        *,
+        enabled_only: bool = False,
     ) -> list[PreferenceIntent]:
-        stmt = (
-            select(PreferenceIntent)
-            .where(
-                PreferenceIntent.id.in_(preference_ids),
-                PreferenceIntent.profile_id == profile_id
-            )
+        stmt = select(PreferenceIntent).where(
+            PreferenceIntent.id.in_(preference_ids),
+            PreferenceIntent.profile_id == profile_id,
         )
+        if enabled_only:
+            stmt = stmt.where(PreferenceIntent.enabled.is_(True))
         result = await self._session.scalars(stmt)
         return list(result)

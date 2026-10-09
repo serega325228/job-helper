@@ -4,8 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Lock
 from unittest.mock import Mock, patch
 
-from src.infrastructure.laya.laya_provider import LayaProvider
 from src.infrastructure.embedder.local import EmbeddingService
+from src.infrastructure.laya.laya_provider import LayaProvider
 
 
 class ModelConcurrencyTest(unittest.TestCase):
@@ -48,20 +48,6 @@ class ModelConcurrencyTest(unittest.TestCase):
             first_call.result(timeout=1)
             second_call.result(timeout=1)
         self.assertEqual(maximum, 1)
-
-    def test_laya_single_and_batch_inference_share_one_guard(self):
-        model = Mock()
-        with patch(
-            "src.infrastructure.laya.laya_provider.laya.load", return_value=model
-        ):
-            provider = LayaProvider()
-        self.assert_serialized(
-            (model.predict, model.predict_batch),
-            lambda: provider.evaluate({"title": "Python"}, {}),
-            lambda: provider.evaluate_batch([{"title": "Python"}], {}),
-        )
-        model.predict.assert_called_once()
-        model.predict_batch.assert_called_once()
 
     def test_embedding_calls_share_one_guard(self):
         model = Mock()
@@ -110,6 +96,48 @@ class ModelConcurrencyTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Embedding service is closed"):
             asyncio.run(service.embed(["Python"]))
         model.embed.assert_called_once()
+
+
+class LayaConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_laya_calls_and_cancellation_share_one_guard(self):
+        model = Mock()
+        model.predict.return_value = {"answers": {}}
+        model.predict_batch.return_value = [{"answers": {}}]
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = 0
+
+        async def offload(predict):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                entered.set()
+                await release.wait()
+            return predict()
+
+        with (
+            patch(
+                "src.infrastructure.laya.laya_provider.laya.load", return_value=model
+            ) as load,
+            patch(
+                "src.infrastructure.laya.laya_provider.asyncio.to_thread",
+                side_effect=offload,
+            ),
+        ):
+            provider = LayaProvider()
+            first = asyncio.create_task(provider.evaluate({"title": "AI"}, {}))
+            await entered.wait()
+            second = asyncio.create_task(provider.evaluate_batch([{"title": "AI"}], {}))
+            first.cancel()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            self.assertEqual(calls, 1)
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+            self.assertEqual(await second, [{"answers": {}}])
+            load.assert_called_once()
+            model.predict.assert_called_once()
+            model.predict_batch.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -1,4 +1,3 @@
-import logging
 import re
 from datetime import UTC, datetime
 from urllib.parse import urlencode, urljoin, urlsplit
@@ -152,9 +151,6 @@ class LinkedInVacancySource:
         if await end.is_visible():
             return False
         button = page.get_by_role("button", name="See more jobs", exact=True)
-        if await button.count() == 0:
-            return False
-
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         await page.wait_for_function(
             """({cards, count, end}) =>
@@ -170,6 +166,8 @@ class LinkedInVacancySource:
         if await end.is_visible():
             return False
 
+        if await button.count() == 0:
+            return False
         await button.click()
         await page.wait_for_function(
             """({cards, count, end}) =>

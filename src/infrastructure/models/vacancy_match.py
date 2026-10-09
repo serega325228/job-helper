@@ -2,12 +2,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import Float, ForeignKey, UniqueConstraint
+from sqlalchemy import Enum, Float, ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import Boolean, DateTime, String, Text
 
 from src.infrastructure.models.base import Base
+from src.schemas.vacancy import ProcessingStatus
 
 if TYPE_CHECKING:
     from src.infrastructure.models.preference_intent import PreferenceIntent
@@ -33,6 +34,18 @@ class VacancyMatch(Base):
         ForeignKey("preference_intents.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
+    )
+
+    batch_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("vacancy_batches.id"), index=True
+    )
+    processing_status: Mapped[ProcessingStatus] = mapped_column(
+        Enum(
+            ProcessingStatus,
+            native_enum=False,
+            values_callable=lambda enum: [item.value for item in enum],
+        ),
+        default=ProcessingStatus.PENDING_EMBEDDING,
     )
 
     structured_profile_score: Mapped[float] = mapped_column(Float, nullable=False)

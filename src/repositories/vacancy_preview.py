@@ -1,5 +1,5 @@
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
@@ -7,7 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.models.company import Company
 from src.infrastructure.models.vacancy import Vacancy
-from src.infrastructure.models.vacancy_preview import PreviewCollection, VacancyPreview
+from src.infrastructure.models.vacancy_preview import (
+    CollectedPreview,
+    PreviewCollection,
+    VacancyPreview,
+)
 from src.schemas.vacancy import CollectionStatus, PreviewStatus
 from src.schemas.vacancy import VacancyPreview as PreviewData
 
@@ -44,72 +48,70 @@ class VacancyPreviewRepository:
     def add_collections(self, collections: list[PreviewCollection]) -> None:
         self._session.add_all(collections)
 
-    async def get_collection(
-        self, collection_id: UUID, *, lock: bool = False
-    ) -> PreviewCollection | None:
+    async def get_collection(self, collection_id: UUID, *, lock: bool = False):
         statement = select(PreviewCollection).where(
             PreviewCollection.id == collection_id
         )
         if lock:
-            statement = statement.with_for_update(skip_locked=True, key_share=True)
+            statement = statement.with_for_update()
         return await self._session.scalar(
             statement.execution_options(populate_existing=True)
         )
 
-    async def get_by_ids(
-        self, preview_ids: list[UUID], *, lock: bool = False
-    ) -> list[VacancyPreview]:
-        statement = (
-            select(VacancyPreview)
-            .where(VacancyPreview.id.in_(preview_ids))
-            .order_by(VacancyPreview.id)
-        )
-        if lock:
-            statement = statement.with_for_update(skip_locked=True)
+    async def get_by_ids(self, preview_ids: list[UUID]) -> list[VacancyPreview]:
         return list(
             await self._session.scalars(
+                select(VacancyPreview)
+                .where(VacancyPreview.id.in_(preview_ids))
+                .execution_options(populate_existing=True)
+            )
+        )
+
+    async def get_collected(
+        self,
+        *,
+        ids: list[UUID] | None = None,
+        profile_id: UUID | None = None,
+        collection_id: UUID | None = None,
+        status: PreviewStatus | None = None,
+        limit: int | None = None,
+        lock: bool = False,
+    ) -> list:
+        statement = (
+            select(CollectedPreview, VacancyPreview)
+            .join(VacancyPreview, VacancyPreview.id == CollectedPreview.preview_id)
+            .join(
+                PreviewCollection,
+                PreviewCollection.id == CollectedPreview.collection_id,
+            )
+        )
+        if ids is not None:
+            statement = statement.where(CollectedPreview.id.in_(ids))
+        if profile_id is not None:
+            statement = statement.where(PreviewCollection.profile_id == profile_id)
+        if collection_id is not None:
+            statement = statement.where(CollectedPreview.collection_id == collection_id)
+        if status is not None:
+            statement = statement.where(CollectedPreview.status == status)
+        statement = statement.order_by(
+            VacancyPreview.discovered_at.desc(), CollectedPreview.id
+        )
+        if limit is not None:
+            statement = statement.limit(limit)
+        if lock:
+            statement = statement.with_for_update(of=CollectedPreview)
+        return list(
+            await self._session.execute(
                 statement.execution_options(populate_existing=True)
             )
         )
 
-    async def list_ready(
-        self, profile_id: UUID, preview_ids: list[UUID] | None = None
-    ) -> list[VacancyPreview]:
-        statement = (
-            select(VacancyPreview)
-            .join(PreviewCollection)
-            .where(
-                PreviewCollection.profile_id == profile_id,
-                VacancyPreview.status == PreviewStatus.READY,
-            )
-            .order_by(VacancyPreview.discovered_at.desc(), VacancyPreview.id)
-            .with_for_update(of=VacancyPreview, skip_locked=True)
-        )
-        if preview_ids is not None:
-            statement = statement.where(VacancyPreview.id.in_(preview_ids))
-        return list(await self._session.scalars(statement))
-
-    async def list_for_profile(
-        self, profile_id: UUID, limit: int
-    ) -> list[VacancyPreview]:
-        statement = (
-            select(VacancyPreview)
-            .join(PreviewCollection)
-            .where(
-                PreviewCollection.profile_id == profile_id,
-            )
-            .order_by(VacancyPreview.discovered_at.desc(), VacancyPreview.id)
-            .limit(limit)
-        )
-        return list(await self._session.scalars(statement))
-
     async def save_new(
-        self,
-        collection_id: UUID,
-        previews: list[PreviewData],
-    ) -> list[VacancyPreview]:
+        self, collection_id: UUID, previews: list[PreviewData]
+    ) -> list[UUID]:
         if not previews:
             return []
+        # ponytail: company/title can merge distinct openings; add location/conditions if false positives grow.
         normalized = {
             (
                 " ".join((preview.company_name or "").casefold().split()),
@@ -125,98 +127,118 @@ class VacancyPreviewRepository:
             await self._session.execute(
                 select(func.pg_advisory_xact_lock(func.hashtextextended(key, 0)))
             )
-        existing_keys: set[tuple[str, str]] = set()
-        existing_reposts: set[tuple[str, str]] = set()
         now = datetime.now(UTC)
+        exact, reposts = {}, {}
         for model in (VacancyPreview, Vacancy):
-            statement = select(
-                model.source,
-                model.external_id,
-                model.normalized_company,
-                model.normalized_title,
-                model.discovered_at,
-            ).where(
-                or_(
-                    tuple_(model.source, model.external_id).in_(keys),
-                    (model.discovered_at >= now - timedelta(days=7))
-                    & (model.discovered_at <= now)
-                    & tuple_(model.normalized_company, model.normalized_title).in_(
-                        normalized
-                    ),
-                ),
+            statement = (
+                select(model)
+                .where(
+                    or_(
+                        tuple_(model.source, model.external_id).in_(keys),
+                        (model.discovered_at >= now - timedelta(days=7))
+                        & (model.discovered_at <= now)
+                        & tuple_(model.normalized_company, model.normalized_title).in_(
+                            normalized
+                        ),
+                    )
+                )
+                .order_by(model.discovered_at.desc())
             )
-            for (
-                source,
-                external_id,
-                company,
-                title,
-                discovered_at,
-            ) in await self._session.execute(statement):
-                existing_keys.add((source, external_id))
-                if company and now - timedelta(days=7) <= discovered_at <= now:
-                    existing_reposts.add((company, title))
-        values = []
-        for preview in previews:
-            key = (preview.source, preview.external_id)
+            for row in await self._session.scalars(statement):
+                exact.setdefault((row.source, row.external_id), row)
+                if (
+                    row.normalized_company
+                    and now - timedelta(days=7) <= row.discovered_at <= now
+                ):
+                    reposts.setdefault(
+                        (row.normalized_company, row.normalized_title), row
+                    )
+        new_values, preview_ids = [], set()
+        for data in previews:
+            key = (data.source, data.external_id)
             repost = (
-                " ".join((preview.company_name or "").casefold().split()),
-                " ".join(preview.title.casefold().split()),
+                " ".join((data.company_name or "").casefold().split()),
+                " ".join(data.title.casefold().split()),
             )
-            if key in existing_keys or (repost[0] and repost in existing_reposts):
+            existing = exact.get(key) or (reposts.get(repost) if repost[0] else None)
+            if isinstance(existing, Vacancy):
+                if existing.preview_id:
+                    preview_ids.add(existing.preview_id)
+                    continue
+                data = PreviewData.model_validate(existing)
+                key = (data.source, data.external_id)
+            if isinstance(existing, VacancyPreview):
+                preview_ids.add(existing.id)
                 continue
-            existing_keys.add(key)
+            identifier = uuid4()
+            values = {
+                **data.model_dump(mode="python"),
+                "id": identifier,
+                "url": str(data.url),
+                "normalized_company": repost[0] or None,
+                "normalized_title": repost[1],
+            }
+            new_values.append(values)
+            row = VacancyPreview(**values)
+            exact[key] = row
             if repost[0]:
-                existing_reposts.add(repost)
-            values.append(
-                {
-                    **preview.model_dump(mode="python"),
-                    "url": str(preview.url),
-                    "collection_id": collection_id,
-                    "normalized_company": repost[0] or None,
-                    "normalized_title": repost[1],
-                    "status": PreviewStatus.PENDING_FILTER,
-                }
+                reposts[repost] = row
+            preview_ids.add(identifier)
+        if new_values:
+            await self._session.execute(insert(VacancyPreview).values(new_values))
+        await self._session.execute(
+            insert(CollectedPreview)
+            .values(
+                [
+                    {"collection_id": collection_id, "preview_id": identifier}
+                    for identifier in sorted(preview_ids)
+                ]
             )
-        if not values:
-            return []
-        statement = (
-            insert(VacancyPreview)
-            .values(values)
             .on_conflict_do_nothing(
-                index_elements=[VacancyPreview.source, VacancyPreview.external_id],
+                index_elements=[
+                    CollectedPreview.collection_id,
+                    CollectedPreview.preview_id,
+                ]
             )
-            .returning(VacancyPreview)
         )
-        return list(await self._session.scalars(statement))
+        return [
+            collected.id
+            for collected, _ in await self.get_collected(
+                collection_id=collection_id, status=PreviewStatus.PENDING_FILTER
+            )
+            if collected.preview_id in preview_ids
+        ]
 
     async def stale_collections(
-        self, cutoff: datetime, limit: int
-    ) -> list[PreviewCollection]:
+        self, cutoff: datetime, lease_cutoff: datetime, limit: int
+    ):
         return list(
             await self._session.scalars(
                 select(PreviewCollection)
                 .where(
                     PreviewCollection.status == CollectionStatus.PENDING,
                     PreviewCollection.updated_at < cutoff,
+                    or_(
+                        PreviewCollection.processing_token.is_(None),
+                        PreviewCollection.updated_at < lease_cutoff,
+                    ),
                 )
                 .order_by(PreviewCollection.updated_at)
                 .limit(limit)
-                .with_for_update(skip_locked=True),
+                .with_for_update(skip_locked=True)
             )
         )
 
-    async def stale_previews(
-        self, cutoff: datetime, limit: int
-    ) -> list[VacancyPreview]:
+    async def stale_previews(self, cutoff: datetime, limit: int):
         return list(
             await self._session.scalars(
-                select(VacancyPreview)
+                select(CollectedPreview)
                 .where(
-                    VacancyPreview.status == PreviewStatus.PENDING_FILTER,
-                    VacancyPreview.updated_at < cutoff,
+                    CollectedPreview.status == PreviewStatus.PENDING_FILTER,
+                    CollectedPreview.updated_at < cutoff,
                 )
-                .order_by(VacancyPreview.updated_at)
+                .order_by(CollectedPreview.updated_at)
                 .limit(limit)
-                .with_for_update(skip_locked=True),
+                .with_for_update(skip_locked=True)
             )
         )

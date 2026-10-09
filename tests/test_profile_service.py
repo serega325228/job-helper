@@ -29,6 +29,7 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result, expected)
         unit_of_work.profiles.get_preferences_by_profile_id.assert_awaited_once_with(
             profile_id,
+            enabled_only=False,
         )
 
 

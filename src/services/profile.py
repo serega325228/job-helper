@@ -40,9 +40,13 @@ class ProfileService:
     async def get_preferences_by_profile_id(
         self,
         profile_id: UUID,
+        *,
+        enabled_only: bool = False,
     ) -> list[PreferenceIntent]:
         async with self._uow as uow:
-            return await uow.profiles.get_preferences_by_profile_id(profile_id)
+            return await uow.profiles.get_preferences_by_profile_id(
+                profile_id, enabled_only=enabled_only
+            )
 
     async def get_preferences_by_ids(
         self,

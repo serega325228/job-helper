@@ -1,24 +1,16 @@
 import math
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from typing import ClassVar
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from src.config.settings import Settings
 from src.exceptions.profile import ProfileNotFoundError
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
-from src.infrastructure.models.vacancy_match import VacancyMatch
 from src.schemas.scoring import LayaComparison, PreferenceComparison, ProfileComparison
-from src.schemas.vacancy import (
-    BatchStatus,
-    ProcessingStatus,
-    RawVacancy,
-    VacancyHardFilters,
-)
-from src.schemas.vacancy_match import (
-    MatchCategory,
-    VacancyEmbeddingSearchResult,
-    VacancyMatchResult,
-)
+from src.schemas.vacancy import BatchStatus, ProcessingStatus, VacancyHardFilters
+from src.schemas.vacancy_match import MatchCategory, VacancyMatchResult
 from src.services.scoring import ScoringService
-from src.services.vacancy import VacancyService
 
 
 class VacancyMatchService:
@@ -42,332 +34,388 @@ class VacancyMatchService:
         self,
         unit_of_work: SqlAlchemyUnitOfWork,
         scoring_service: ScoringService,
+        settings: Settings,
     ) -> None:
         self._uow = unit_of_work
         self._scoring = scoring_service
+        self._settings = settings
 
-    async def score_embeddings(self, batch_id: UUID, service: VacancyService) -> bool:
+    @asynccontextmanager
+    async def _stage(self, batch_id: UUID, expected: BatchStatus):
+        token = uuid4()
         async with self._uow as uow:
             batch = await uow.vacancies.get_batch(batch_id)
-            if batch is None or batch.status != BatchStatus.DETAILS:
-                return False
-            vacancies = await uow.vacancies.get_batch_vacancies(batch_id)
-            if any(
-                vacancy.processing_status
-                in {ProcessingStatus.PENDING_SCRAPE, ProcessingStatus.PENDING_PARSE}
-                for vacancy in vacancies
-            ):
-                return False
-            pending = [
-                vacancy
-                for vacancy in vacancies
-                if vacancy.processing_status == ProcessingStatus.PENDING_EMBEDDING
-            ]
-            if not pending:
-                batch.status = BatchStatus.COMPLETED
-                return False
+            claimed = False
+            if batch is not None and batch.status == expected:
+                cutoff = datetime.now(UTC) - timedelta(
+                    seconds=self._settings.taskiq.lease_timeout_seconds
+                )
+                if (
+                    batch.processing_token is not None
+                    and batch.updated_at >= cutoff
+                    or expected == BatchStatus.DETAILS
+                    and any(
+                        vacancy.processing_status
+                        in {
+                            ProcessingStatus.PENDING_SCRAPE,
+                            ProcessingStatus.PENDING_PARSE,
+                        }
+                        for vacancy in await uow.vacancies.get_vacancies_by_ids(
+                            [UUID(value) for value in batch.vacancy_ids]
+                        )
+                    )
+                ):
+                    batch = None
+                elif batch.attempts >= self._settings.taskiq.stage_attempts:
+                    batch.status = BatchStatus.FAILED
+                    batch.error = "Stage attempts exhausted"
+                    batch.processing_token = None
+                    await uow.vacancy_matches.fail_batch(batch_id)
+                else:
+                    batch.processing_token = token
+                    batch.attempts += 1
+                    batch.updated_at = datetime.now(UTC)
+                    claimed = True
+        try:
+            yield batch, token
+        except Exception as error:
+            if claimed:
+                async with self._uow as uow:
+                    row = await uow.vacancies.get_batch(batch_id)
+                    if row.processing_token == token:
+                        row.processing_token = None
+                        row.error = str(error)
+                        if (
+                            isinstance(error, (ValueError, ProfileNotFoundError))
+                            or row.attempts >= self._settings.taskiq.stage_attempts
+                        ):
+                            row.status = BatchStatus.FAILED
+                            await uow.vacancy_matches.fail_batch(batch_id)
+            raise
+
+    async def _inputs(self, batch):
+        async with self._uow as uow:
             profile = await uow.profiles.get_by_id(batch.profile_id)
             if profile is None:
                 raise ProfileNotFoundError(batch.profile_id)
-            preferences = [
-                preference
-                for preference in await uow.profiles.get_preferences_by_ids(
-                    batch.profile_id, [UUID(value) for value in batch.preference_ids]
-                )
-                if preference.enabled
-            ]
+            preferences = await uow.profiles.get_preferences_by_ids(
+                batch.profile_id,
+                [UUID(value) for value in batch.preference_ids],
+                enabled_only=True,
+            )
             if not preferences:
                 raise ValueError("No enabled preferences remain for this batch")
-            await self._scoring.update_preference_embeddings(
-                [
-                    preference
-                    for preference in preferences
-                    if preference.title_embedding is None
-                    or preference.content_embedding is None
-                ]
+            vacancies = await uow.vacancies.get_vacancies_by_ids(
+                [UUID(value) for value in batch.vacancy_ids]
             )
-            raw_by_key = {
-                (vacancy.source, vacancy.external_id): RawVacancy.model_validate(
-                    vacancy.raw_document
-                )
-                for vacancy in pending
+            matches = await uow.vacancy_matches.get_batch_matches(batch.id)
+        if len(vacancies) != len(batch.vacancy_ids):
+            raise ValueError("Batch vacancies are missing")
+        preferences_by_id = {item.id: item for item in preferences}
+        if batch.status != BatchStatus.DETAILS and any(
+            match.preference_intent_id not in preferences_by_id
+            for match in matches
+            if match.processing_status
+            not in {ProcessingStatus.FILTERED, ProcessingStatus.COMPLETED}
+        ):
+            raise ValueError("A shortlisted preference was disabled or removed")
+        vacancies_by_id = {item.id: item for item in vacancies}
+        if batch.status != BatchStatus.DETAILS and any(
+            match.processing_status
+            not in {ProcessingStatus.COMPLETED, ProcessingStatus.FILTERED}
+            and vacancies_by_id[match.vacancy_id].processing_status
+            != ProcessingStatus.COMPLETED
+            for match in matches
+        ):
+            raise ValueError("A shortlisted vacancy is not fully parsed")
+        return profile, preferences_by_id, vacancies_by_id, matches
+
+    @staticmethod
+    def _finish(batch, status: BatchStatus) -> None:
+        batch.status = status
+        batch.processing_token = None
+        batch.attempts = 0
+        batch.error = None
+
+    async def score_embeddings(self, batch_id: UUID) -> bool:
+        async with self._stage(batch_id, BatchStatus.DETAILS) as (batch, token):
+            if batch is None or batch.status != BatchStatus.DETAILS:
+                return batch is not None and batch.status == BatchStatus.PENDING_RERANK
+            profile, preferences, vacancies, _ = await self._inputs(batch)
+            eligible = {
+                identifier: vacancy
+                for identifier, vacancy in vacancies.items()
+                if vacancy.processing_status == ProcessingStatus.COMPLETED
             }
-            embeddings = await service._build_embeddings(raw_by_key, pending)
-            for vacancy in pending:
-                vacancy.content_embedding, vacancy.title_embedding = embeddings[
-                    (vacancy.source, vacancy.external_id)
-                ]
-            await uow.flush()
-            results = await uow.vacancy_matches.search_by_preferences(
-                batch.profile_id,
-                VacancyHardFilters.model_validate(batch.hard_filters),
-                limit=batch.search_limit,
-                title_weight=batch.title_weight,
-                candidate_limit=len(pending),
-                per_preference_limit=len(pending),
-                vacancy_ids=[vacancy.id for vacancy in pending],
-                preference_ids=[preference.id for preference in preferences],
-            )
-            existing = {
-                match.vacancy_id: match
-                for match in await uow.vacancy_matches.get_by_profile_and_vacancy_ids(
-                    batch.profile_id, [result.vacancy_id for result in results]
-                )
+            if not eligible:
+                async with self._uow as uow:
+                    row = await uow.vacancies.get_batch(batch_id)
+                    if row.processing_token == token:
+                        failed = any(
+                            item.processing_status == ProcessingStatus.FAILED
+                            for item in vacancies.values()
+                        )
+                        self._finish(
+                            row, BatchStatus.FAILED if failed else BatchStatus.COMPLETED
+                        )
+                        if failed:
+                            row.error = "All available vacancy details failed"
+                return False
+            entities = [*preferences.values(), *eligible.values()]
+            fingerprints = {
+                entity.id: self._scoring.embedding_fingerprint(entity)
+                for entity in entities
             }
-            by_id = {vacancy.id: vacancy for vacancy in pending}
-            preferences_by_id = {
-                preference.id: preference for preference in preferences
-            }
-            selected_ids = set()
-            new_matches = []
-            for result in results:
-                vacancy = by_id[result.vacancy_id]
-                preference = preferences_by_id[result.preference_id]
-                profile_comparison = self._scoring.compare_profile(profile, vacancy)
-                preference_comparison = self._scoring.compare_preference(
-                    preference, vacancy
+            embeddings = await self._scoring.embed_entities(entities)
+            async with self._uow as uow:
+                row = await uow.vacancies.get_batch(batch_id)
+                if row.processing_token != token:
+                    return False
+                current_preferences = await uow.profiles.get_preferences_by_ids(
+                    batch.profile_id, list(preferences), enabled_only=True
                 )
-                values = {
-                    "profile_id": profile.id,
-                    "vacancy_id": vacancy.id,
-                    "preference_intent_id": preference.id,
-                    "structured_profile_score": profile_comparison.score,
-                    "structured_preference_score": preference_comparison.score,
-                    "profile_rerank_score": None,
-                    "preference_rerank_score": None,
-                    "total_score": None,
-                    "category": None,
-                    "hard_constraints_passed": preference_comparison.hard_constraints_passed,
-                    "component_scores": {
-                        "profile": profile_comparison.components,
-                        "preference": preference_comparison.components,
-                        "semantic": {
-                            "title": result.title_similarity,
-                            "content": result.content_similarity,
-                            "combined": result.combined_similarity,
-                        },
-                    },
-                    "matched_skills": profile_comparison.matched_skills,
-                    "missing_skills": profile_comparison.missing_skills,
-                    "matcher_version": "structured-laya-rerank-v1",
+                current_vacancies = await uow.vacancies.get_vacancies_by_ids(
+                    list(eligible), lock=True
+                )
+                for entity in [*current_preferences, *current_vacancies]:
+                    if (
+                        self._scoring.embedding_fingerprint(entity)
+                        != fingerprints[entity.id]
+                    ):
+                        raise RuntimeError("Embedding input changed while processing")
+                    if entity.id in embeddings:
+                        title, content, fingerprint = embeddings[entity.id]
+                        entity.title_embedding = title
+                        entity.content_embedding = content
+                        entity.embedding_fingerprint = fingerprint
+                await uow.flush()
+                results = await uow.vacancy_matches.embedding_scores(
+                    batch.profile_id,
+                    VacancyHardFilters.model_validate(batch.hard_filters),
+                    list(eligible),
+                    list(preferences),
+                    batch.title_weight,
+                    selection_context=batch.selection_context,
+                )
+                best = {}
+                for result in results:
+                    vacancy = eligible[result.vacancy_id]
+                    preference = preferences[result.preference_id]
+                    comparison = self._scoring.compare_preference(preference, vacancy)
+                    if not comparison.hard_constraints_passed:
+                        continue
+                    selection_score = result.combined_similarity * preference.weight
+                    previous = best.get(vacancy.id)
+                    if previous is None or selection_score > previous[0]:
+                        best[vacancy.id] = (selection_score, result, comparison)
+                ordered = sorted(
+                    best.values(), key=lambda item: (-item[0], str(item[1].vacancy_id))
+                )
+                shortlisted = {
+                    item[1].vacancy_id
+                    for item in ordered[: min(batch.search_limit, batch.rerank_limit)]
                 }
-                match = existing.get(vacancy.id)
-                if match is None:
-                    new_matches.append(VacancyMatch(**values))
-                else:
-                    for field, value in values.items():
-                        setattr(match, field, value)
-                if (
-                    preference_comparison.hard_constraints_passed
-                    and len(selected_ids) < batch.rerank_limit
+                values = []
+                for selection_score, result, comparison in ordered:
+                    vacancy = eligible[result.vacancy_id]
+                    profile_comparison = self._scoring.compare_profile(profile, vacancy)
+                    values.append(
+                        {
+                            "profile_id": profile.id,
+                            "vacancy_id": vacancy.id,
+                            "batch_id": batch_id,
+                            "preference_intent_id": result.preference_id,
+                            "processing_status": ProcessingStatus.PENDING_RERANK
+                            if vacancy.id in shortlisted
+                            else ProcessingStatus.FILTERED,
+                            "structured_profile_score": profile_comparison.score,
+                            "structured_preference_score": comparison.score,
+                            "profile_rerank_score": None,
+                            "preference_rerank_score": None,
+                            "total_score": None,
+                            "category": None,
+                            "hard_constraints_passed": True,
+                            "component_scores": {
+                                "profile": profile_comparison.components,
+                                "preference": comparison.components,
+                                "semantic": {
+                                    "title": result.title_similarity,
+                                    "content": result.content_similarity,
+                                    "combined": result.combined_similarity,
+                                    "selection": selection_score,
+                                },
+                            },
+                            "matched_skills": profile_comparison.matched_skills,
+                            "missing_skills": profile_comparison.missing_skills,
+                            "matcher_version": "structured-laya-rerank-v1",
+                            "explanation": None,
+                            "reranker_model": None,
+                        }
+                    )
+                for match in await uow.vacancy_matches.get_by_profile_and_vacancy_ids(
+                    batch.profile_id,
+                    [identifier for identifier in vacancies if identifier not in best],
                 ):
-                    selected_ids.add(vacancy.id)
-            uow.vacancy_matches.add_all(new_matches)
-            for vacancy in pending:
-                vacancy.processing_status = (
-                    ProcessingStatus.PENDING_RERANK
-                    if vacancy.id in selected_ids
-                    else ProcessingStatus.FILTERED
+                    match.batch_id = batch_id
+                    match.processing_status = ProcessingStatus.FILTERED
+                    match.total_score = None
+                    match.category = None
+                await uow.vacancy_matches.upsert_initial(values)
+                self._finish(
+                    row,
+                    BatchStatus.PENDING_RERANK
+                    if shortlisted
+                    else BatchStatus.COMPLETED,
                 )
-            batch.status = (
-                BatchStatus.PENDING_RERANK if selected_ids else BatchStatus.COMPLETED
-            )
-        return bool(selected_ids)
+            return bool(shortlisted)
 
     async def rerank_batch(self, batch_id: UUID) -> bool:
-        async with self._uow as uow:
-            batch = await uow.vacancies.get_batch(batch_id)
+        async with self._stage(batch_id, BatchStatus.PENDING_RERANK) as (batch, token):
             if batch is None or batch.status != BatchStatus.PENDING_RERANK:
-                return False
-            vacancies = [
-                vacancy
-                for vacancy in await uow.vacancies.get_batch_vacancies(batch_id)
-                if vacancy.processing_status == ProcessingStatus.PENDING_RERANK
+                return batch is not None and batch.status == BatchStatus.PENDING_LAYA
+            profile, preferences, vacancies, matches = await self._inputs(batch)
+            pending = [
+                match
+                for match in matches
+                if match.processing_status == ProcessingStatus.PENDING_RERANK
             ]
-            if not vacancies:
-                return False
-            profile = await uow.profiles.get_by_id(batch.profile_id)
-            if profile is None:
-                raise ProfileNotFoundError(batch.profile_id)
-            matches = {
-                match.vacancy_id: match
-                for match in await uow.vacancy_matches.get_by_profile_and_vacancy_ids(
-                    profile.id, [vacancy.id for vacancy in vacancies]
-                )
-            }
-            preferences = {
-                preference.id: preference
-                for preference in await uow.profiles.get_preferences_by_ids(
-                    profile.id,
-                    [match.preference_intent_id for match in matches.values()],
-                )
-            }
+            if not pending:
+                raise ValueError("Rerank shortlist is missing")
             scores = await self._scoring.rerank_vacancies(
                 profile,
-                vacancies,
+                [vacancies[match.vacancy_id] for match in pending],
                 {
-                    vacancy.id: preferences[matches[vacancy.id].preference_intent_id]
-                    for vacancy in vacancies
+                    match.vacancy_id: preferences[match.preference_intent_id]
+                    for match in pending
                 },
             )
-            for vacancy in vacancies:
-                match = matches[vacancy.id]
-                match.profile_rerank_score = scores[vacancy.id].profile_score
-                match.preference_rerank_score = scores[vacancy.id].preference_score
-                vacancy.processing_status = ProcessingStatus.PENDING_LAYA
-            batch.status = BatchStatus.PENDING_LAYA
-        return True
+            async with self._uow as uow:
+                row = await uow.vacancies.get_batch(batch_id)
+                if row.processing_token != token:
+                    return False
+                for match in await uow.vacancy_matches.get_batch_matches(
+                    batch_id, lock=True
+                ):
+                    if match.processing_status != ProcessingStatus.PENDING_RERANK:
+                        continue
+                    match.profile_rerank_score = scores[match.vacancy_id].profile_score
+                    match.preference_rerank_score = scores[
+                        match.vacancy_id
+                    ].preference_score
+                    match.processing_status = ProcessingStatus.PENDING_LAYA
+                self._finish(row, BatchStatus.PENDING_LAYA)
+            return True
 
     async def evaluate_batch(self, batch_id: UUID, *, batch_size: int) -> bool:
-        async with self._uow as uow:
-            batch = await uow.vacancies.get_batch(batch_id)
+        async with self._stage(batch_id, BatchStatus.PENDING_LAYA) as (batch, token):
             if batch is None or batch.status != BatchStatus.PENDING_LAYA:
-                return False
-            vacancies = [
-                vacancy
-                for vacancy in await uow.vacancies.get_batch_vacancies(batch_id)
-                if vacancy.processing_status == ProcessingStatus.PENDING_LAYA
+                return batch is not None and batch.status == BatchStatus.PENDING_SAVE
+            profile, preferences, vacancies, matches = await self._inputs(batch)
+            pending = [
+                match
+                for match in matches
+                if match.processing_status == ProcessingStatus.PENDING_LAYA
             ]
-            if not vacancies:
-                return False
-            profile = await uow.profiles.get_by_id(batch.profile_id)
-            if profile is None:
-                raise ProfileNotFoundError(batch.profile_id)
-            matches = {
-                match.vacancy_id: match
-                for match in await uow.vacancy_matches.get_by_profile_and_vacancy_ids(
-                    profile.id, [vacancy.id for vacancy in vacancies]
-                )
-            }
+            if not any(
+                match.processing_status
+                in {ProcessingStatus.PENDING_LAYA, ProcessingStatus.PENDING_SAVE}
+                for match in matches
+            ):
+                raise ValueError("Detailed evaluation shortlist is missing")
             if any(
-                matches[vacancy.id].profile_rerank_score is None
-                or matches[vacancy.id].preference_rerank_score is None
-                for vacancy in vacancies
+                match.profile_rerank_score is None
+                or match.preference_rerank_score is None
+                for match in pending
             ):
                 raise ValueError("Detailed Laya evaluation requires rerank scores")
-            preferences = {
-                preference.id: preference
-                for preference in await uow.profiles.get_preferences_by_ids(
-                    profile.id,
-                    [match.preference_intent_id for match in matches.values()],
+            for offset in range(0, len(pending), batch_size):
+                chunk = pending[offset : offset + batch_size]
+                evaluations = await self._scoring.laya_match_vacancies(
+                    profile,
+                    {
+                        match.vacancy_id: preferences[match.preference_intent_id]
+                        for match in chunk
+                    },
+                    {match.vacancy_id: vacancies[match.vacancy_id] for match in chunk},
+                    batch_size=batch_size,
                 )
-            }
-            evaluations = await self._scoring.laya_match_vacancies(
-                profile,
-                {
-                    vacancy.id: preferences[matches[vacancy.id].preference_intent_id]
-                    for vacancy in vacancies
-                },
-                {vacancy.id: vacancy for vacancy in vacancies},
-                batch_size=batch_size,
-            )
-            for vacancy in vacancies:
-                match = matches[vacancy.id]
-                match.component_scores = {
-                    **match.component_scores,
-                    "laya": evaluations[vacancy.id].model_dump(mode="json"),
-                }
-                vacancy.processing_status = ProcessingStatus.PENDING_SAVE
-            batch.status = BatchStatus.PENDING_SAVE
-        return True
+                async with self._uow as uow:
+                    row = await uow.vacancies.get_batch(batch_id)
+                    if row.processing_token != token:
+                        return False
+                    for match in await uow.vacancy_matches.get_batch_matches(
+                        batch_id, lock=True
+                    ):
+                        if (
+                            match.processing_status == ProcessingStatus.PENDING_LAYA
+                            and match.vacancy_id in evaluations
+                        ):
+                            match.component_scores = {
+                                **match.component_scores,
+                                "laya": evaluations[match.vacancy_id].model_dump(
+                                    mode="json"
+                                ),
+                            }
+                            match.processing_status = ProcessingStatus.PENDING_SAVE
+                    row.updated_at = datetime.now(UTC)
+            async with self._uow as uow:
+                row = await uow.vacancies.get_batch(batch_id)
+                if row.processing_token != token:
+                    return False
+                self._finish(row, BatchStatus.PENDING_SAVE)
+            return True
 
     async def save_batch_scores(self, batch_id: UUID) -> None:
-        async with self._uow as uow:
-            batch = await uow.vacancies.get_batch(batch_id)
+        async with self._stage(batch_id, BatchStatus.PENDING_SAVE) as (batch, token):
             if batch is None or batch.status != BatchStatus.PENDING_SAVE:
                 return
-            vacancies = [
-                vacancy
-                for vacancy in await uow.vacancies.get_batch_vacancies(batch_id)
-                if vacancy.processing_status == ProcessingStatus.PENDING_SAVE
-            ]
-            if not vacancies:
-                return
-            matches = {
-                match.vacancy_id: match
-                for match in await uow.vacancy_matches.get_by_profile_and_vacancy_ids(
-                    batch.profile_id, [vacancy.id for vacancy in vacancies]
+            async with self._uow as uow:
+                row = await uow.vacancies.get_batch(batch_id)
+                if row.processing_token != token:
+                    return
+                matches = await uow.vacancy_matches.get_batch_matches(
+                    batch_id, lock=True
                 )
-            }
-            for vacancy in vacancies:
-                match = matches[vacancy.id]
-                semantic = match.component_scores["semantic"]
-                result = self.build_result(
-                    profile_id=match.profile_id,
-                    vacancy_id=match.vacancy_id,
-                    preference_intent_id=match.preference_intent_id,
-                    profile_comparison=ProfileComparison(
-                        score=match.structured_profile_score,
-                        components=match.component_scores["profile"],
-                        matched_skills=match.matched_skills,
-                        missing_skills=match.missing_skills,
-                    ),
-                    preference_comparison=PreferenceComparison(
-                        score=match.structured_preference_score,
-                        components=match.component_scores["preference"],
-                        hard_constraints_passed=match.hard_constraints_passed,
-                    ),
-                    laya_comparison=LayaComparison.model_validate(
-                        match.component_scores["laya"]
-                    ),
-                    profile_rerank_score=match.profile_rerank_score,
-                    preference_rerank_score=match.preference_rerank_score,
-                    title_similarity=semantic["title"],
-                    content_similarity=semantic["content"],
-                    embedding_similarity=semantic["combined"],
-                )
-                values = result.model_dump(mode="python")
-                values["category"] = result.category.value
-                for field, value in values.items():
-                    setattr(match, field, value)
-                vacancy.processing_status = ProcessingStatus.COMPLETED
-            batch.status = BatchStatus.COMPLETED
-
-    async def save_result(self, result: VacancyMatchResult) -> VacancyMatch:
-        return (await self.save_results([result]))[0]
-
-    async def save_results(
-        self,
-        results: list[VacancyMatchResult],
-    ) -> list[VacancyMatch]:
-        if not results:
-            return []
-
-        profile_ids = {result.profile_id for result in results}
-        if len(profile_ids) != 1:
-            raise ValueError("All vacancy matches must belong to the same profile")
-        vacancy_ids = [result.vacancy_id for result in results]
-        if len(vacancy_ids) != len(set(vacancy_ids)):
-            raise ValueError("Vacancy match results contain duplicate vacancies")
-
-        async with self._uow as uow:
-            existing_matches = {
-                vacancy_match.vacancy_id: vacancy_match
-                for vacancy_match in (
-                    await uow.vacancy_matches.get_by_profile_and_vacancy_ids(
-                        next(iter(profile_ids)),
-                        vacancy_ids,
+                if not any(
+                    match.processing_status == ProcessingStatus.PENDING_SAVE
+                    for match in matches
+                ):
+                    raise ValueError("Detailed evaluation results are missing")
+                for match in matches:
+                    if match.processing_status != ProcessingStatus.PENDING_SAVE:
+                        continue
+                    semantic = match.component_scores["semantic"]
+                    result = self.build_result(
+                        profile_id=match.profile_id,
+                        vacancy_id=match.vacancy_id,
+                        preference_intent_id=match.preference_intent_id,
+                        profile_comparison=ProfileComparison(
+                            score=match.structured_profile_score,
+                            components=match.component_scores["profile"],
+                            matched_skills=match.matched_skills,
+                            missing_skills=match.missing_skills,
+                        ),
+                        preference_comparison=PreferenceComparison(
+                            score=match.structured_preference_score,
+                            components=match.component_scores["preference"],
+                            hard_constraints_passed=match.hard_constraints_passed,
+                        ),
+                        laya_comparison=LayaComparison.model_validate(
+                            match.component_scores["laya"]
+                        ),
+                        profile_rerank_score=match.profile_rerank_score,
+                        preference_rerank_score=match.preference_rerank_score,
+                        title_similarity=semantic["title"],
+                        content_similarity=semantic["content"],
+                        embedding_similarity=semantic["combined"],
                     )
-                )
-            }
-            saved_matches: list[VacancyMatch] = []
-            new_matches: list[VacancyMatch] = []
-            for result in results:
-                values = result.model_dump(mode="python")
-                values["category"] = result.category.value
-                vacancy_match = existing_matches.get(result.vacancy_id)
-                if vacancy_match is None:
-                    vacancy_match = VacancyMatch(**values)
-                    new_matches.append(vacancy_match)
-                else:
+                    values = result.model_dump(mode="python")
+                    values["component_scores"]["semantic"] = semantic
+                    values["category"] = result.category.value
                     for field, value in values.items():
-                        setattr(vacancy_match, field, value)
-                saved_matches.append(vacancy_match)
-
-            uow.vacancy_matches.add_all(new_matches)
-            await uow.flush()
-
-        return saved_matches
+                        setattr(match, field, value)
+                    match.processing_status = ProcessingStatus.COMPLETED
+                self._finish(row, BatchStatus.COMPLETED)
 
     def build_result(
         self,
@@ -460,23 +508,3 @@ class VacancyMatchService:
         if score >= 0.45:
             return MatchCategory.FALLBACK
         return MatchCategory.REJECT
-
-    async def search_by_preferences(
-        self,
-        profile_id: UUID,
-        hard_filters: VacancyHardFilters,
-        *,
-        limit: int = 100,
-        title_weight: float = 0.4,
-        candidate_limit: int = 100,
-        per_preference_limit: int = 50,
-    ) -> list[VacancyEmbeddingSearchResult]:
-        async with self._uow as uow:
-            return await uow.vacancy_matches.search_by_preferences(
-                profile_id,
-                hard_filters,
-                limit=limit,
-                title_weight=title_weight,
-                candidate_limit=candidate_limit,
-                per_preference_limit=per_preference_limit,
-            )
