@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic.main import BaseModel
 
 
-class AgentResult(BaseModel):
+class WizardState(BaseModel):
     status: Literal["success", "needs_input", "failed", "partial"]
     summary: str
     artifact_ids: list[str] = []
