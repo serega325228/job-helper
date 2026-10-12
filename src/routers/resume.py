@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Annotated
+from uuid import UUID
 
 from dishka import FromDishka
 from dishka.integrations.fastapi import inject
@@ -18,10 +19,11 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 router = APIRouter(prefix="resume", tags=["Resume"])
 
 
-@router.post("/upload/master-resume")
+@router.post("/import-master-resume/{profile_id}", status_code=201)
 @inject
-async def upload_master_resume(
+async def import_master_resume(
     file: Annotated[UploadFile, File()],
+    profile_id: Annotated[UUID, Path()],
     resume_service: FromDishka[ResumeService]
 ):
     logger.info("Uploading master resume")
@@ -47,7 +49,13 @@ async def upload_master_resume(
             detail="Empty file",
         )
 
-    # TODO: end up parsing, saving
+    try:
+        await resume_service.import_master_resume(
+            profile_id=profile_id,
+            suffix=suffix,
+            content=content,
+        )
+
 
     except ValueError as e:
         raise HTTPException(
