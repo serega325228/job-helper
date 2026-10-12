@@ -1,16 +1,18 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from sqlalchemy import ForeignKey
+from sqlalchemy import ForeignKey, Index, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.types import JSON, DateTime, String, Text
+from sqlalchemy.types import DateTime, String, Text
 
 from src.infrastructure.models.base import Base
 
 
-class ResumeProcessingStatus(StrEnum):
+class ResumeStatus(StrEnum):
     PENDING = "pending"
+    COMPLETED = "completed"
 
 
 class ResumeType(StrEnum):
@@ -51,30 +53,39 @@ class Resume(Base):
         default=ResumeLanguage.EN,
     )
 
-    resume_type: Mapped[str] = mapped_column(
+    type: Mapped[str] = mapped_column(
         String(30),
         default=ResumeType.TAILORED,
     )
 
-    content: Mapped[dict] = mapped_column(JSON)
+    raw_data: Mapped[dict] = mapped_column(Text)
+    processed_data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     filename: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=datetime.utcnow,
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
     )
 
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+        nullable=False,
     )
 
-    parent_id: Mapped[UUID | None] = mapped_column(nullable=True)
-    processed_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    processing_status: Mapped[str] = mapped_column(
-        String, default=ResumeProcessingStatus.PENDING
+    status: Mapped[str] = mapped_column(String, default=ResumeStatus.PENDING)
+
+    # cover_letter: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # outreach_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # interview_prep: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "uq_resumes_profile_master_resume",
+            "profile_id",
+            unique=True,
+            where=text("type = 'master'"),
+        ),
     )
-    cover_letter: Mapped[str | None] = mapped_column(Text, nullable=True)
-    outreach_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    interview_prep: Mapped[str | None] = mapped_column(Text, nullable=True)

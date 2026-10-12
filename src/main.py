@@ -4,6 +4,7 @@ from dishka.integrations.fastapi import setup_dishka as setup_fastapi_dishka
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.formparsers import MultiPartParser
 from structlog import get_logger
 
 from src.config.logging import configure_logging
@@ -37,6 +38,9 @@ async def lifespan(app: FastAPI):
         await broker.shutdown()
         await container.close()
 
+
+MultiPartParser.max_part_size = 20 * 1024 * 1024
+# MultiPartParser.max_file_size = 20 * 1024 * 1024
 
 app = FastAPI(
     title="Job Helper API",

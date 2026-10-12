@@ -135,7 +135,6 @@ class LLMSettings(BaseSettings):
     def config(self, value: LLMConfig | None) -> None:
         self._config = value
 
-
 class TaskiqSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",

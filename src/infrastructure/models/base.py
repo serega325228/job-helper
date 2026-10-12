@@ -11,3 +11,14 @@ NAMING_CONVENTION = {
 
 class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
+
+    # @staticmethod
+    # def flatten(d: dict, sep: str = "_") -> dict:
+    #     out = {}
+    #     for k, v in d.items():
+    #         if isinstance(v, dict):
+    #             for sub_k, sub_v in Base.flatten(v, sep).items():
+    #                 out[f"{k}{sep}{sub_k}"] = sub_v
+    #         else:
+    #             out[k] = v
+    #     return out

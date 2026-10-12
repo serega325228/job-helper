@@ -9,6 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import DateTime, String, Text
 
 from src.infrastructure.models.base import Base
+from src.infrastructure.models.resume import Resume
 
 if TYPE_CHECKING:
     from src.infrastructure.models.preference_intent import PreferenceIntent
@@ -28,7 +29,7 @@ class Profile(Base):
     name: Mapped[str | None] = mapped_column(String(255))
     raw_story: Mapped[str] = mapped_column(Text, default="", nullable=False)
     profile_summary: Mapped[str | None] = mapped_column(Text)
-    analysis_status: Mapped[str] = mapped_column(
+    analysis_status: Mapped[str] = mapped_column( # Maybe delete this
         String(30),
         default=AnalysisStatus.PENDING,
         nullable=False,
@@ -65,6 +66,11 @@ class Profile(Base):
         lazy="selectin",
     )
     vacancy_matches: Mapped[list[VacancyMatch]] = relationship(
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    resumes: Mapped[list[Resume]] = relationship(
         back_populates="profile",
         cascade="all, delete-orphan",
         passive_deletes=True,

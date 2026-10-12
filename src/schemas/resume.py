@@ -2,6 +2,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from src.infrastructure.models.resume import ResumeLanguage
+
 
 class PersonalInfo(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -58,17 +60,20 @@ class AdditionalInfo(BaseModel):
     awards: list[str] = Field(default_factory=list)
 
 
+
+# TODO: add description to fields for llm
 class ResumeData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    personalInfo: PersonalInfo
+    content_language: ResumeLanguage = Field(default=ResumeLanguage.EN)
+    personal_info: PersonalInfo
     summary: str | None = None
-    workExperience: list[WorkExperience] = Field(default_factory=list)
+    work_experience: list[WorkExperience] = Field(default_factory=list)
     education: list[Education] = Field(default_factory=list)
-    personalProjects: list[PersonalProject] = Field(default_factory=list)
+    personal_projects: list[PersonalProject] = Field(default_factory=list)
     additional: AdditionalInfo = Field(default_factory=AdditionalInfo)
-    customSections: dict[str, JsonValue] = Field(default_factory=dict)
-    sectionMeta: dict[str, JsonValue] = Field(default_factory=dict)
+    custom_sections: dict[str, JsonValue] = Field(default_factory=dict)
+    section_meta: dict[str, JsonValue] = Field(default_factory=dict) # Maybe delete
 
 
 class JobKeywords(BaseModel):
