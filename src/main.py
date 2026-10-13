@@ -26,6 +26,7 @@ settings = get_settings()
 
 logger = get_logger()
 
+# Create agent somewhere, maybe in settings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

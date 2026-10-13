@@ -16,8 +16,8 @@ if TYPE_CHECKING:
     from src.infrastructure.models.vacancy_match import VacancyMatch
 
 
-class PreferenceIntent(Base):
-    __tablename__ = "preference_intents"
+class Preference(Base):
+    __tablename__ = "preferences"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     profile_id: Mapped[UUID] = mapped_column(
@@ -103,26 +103,26 @@ class PreferenceIntent(Base):
         nullable=False,
     )
 
-    profile: Mapped[Profile] = relationship(back_populates="preference_intents")
+    profile: Mapped[Profile] = relationship(back_populates="preferences")
     vacancy_matches: Mapped[list[VacancyMatch]] = relationship(
-        back_populates="preference_intent",
+        back_populates="preferences",
     )
 
     __table_args__ = (
         UniqueConstraint(
             "profile_id",
             "name",
-            name="uq_preference_intents_profile_name",
+            name="uq_preferences_profile_name",
         ),
-        CheckConstraint("weight > 0", name="preference_intent_weight_positive"),
+        CheckConstraint("weight > 0", name="preferences_weight_positive"),
         Index(
-            "ix_preference_intents_content_embedding_hnsw",
+            "ix_preferences_content_embedding_hnsw",
             "content_embedding",
             postgresql_using="hnsw",
             postgresql_ops={"content_embedding": "vector_cosine_ops"},
         ),
         Index(
-            "ix_preference_intents_title_embedding_hnsw",
+            "ix_preferences_title_embedding_hnsw",
             "title_embedding",
             postgresql_using="hnsw",
             postgresql_ops={"title_embedding": "vector_cosine_ops"},

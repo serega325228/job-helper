@@ -24,11 +24,12 @@ RESUME_SCHEMA_EXAMPLE = """{
     "name": "John Doe",
     "title": "Software Engineer",
     "email": "john@example.com",
-    "phone": "+1-555-0100",
+    "phone": "+7-555-333-0100",
     "location": "San Francisco, CA",
     "website": "https://johndoe.dev",
     "linkedin": "linkedin.com/in/johndoe",
     "github": "github.com/johndoe"
+    "telegram": "@johndoe"
   },
   "summary": "Experienced software engineer with 5+ years...",
   "workExperience": [

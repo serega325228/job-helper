@@ -12,7 +12,9 @@ from crawlee.crawlers._playwright import PlaywrightCrawler
 from crawlee.events import LocalEventManager
 from crawlee.storage_clients._file_system import FileSystemStorageClient
 from dishka import FromComponent, Provider, Scope, provide
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from playwright.async_api import Playwright, async_playwright
+from psycopg_pool.pool_async import AsyncConnectionPool
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config.settings import (
@@ -25,8 +27,6 @@ from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.embedder.llama_server import LlamaServerEmbedder
 from src.infrastructure.laya.laya_provider import LayaProvider
 from src.infrastructure.llm.llm import LLMConfigManager, LLMProvider
-from src.infrastructure.llm.profile_analyzer import ProfileAnalyzer
-from src.infrastructure.llm.vacancy_analyzer import VacancyAnalyzer
 from src.infrastructure.pdf.pdf import PDFRender
 from src.infrastructure.reranker.llama_server import LlamaServerReranker
 from src.infrastructure.vacancy_sources.hh.client import HhApiClient
@@ -34,7 +34,6 @@ from src.infrastructure.vacancy_sources.hh.source import HhVacancySource
 from src.infrastructure.vacancy_sources.linkedin.source import LinkedInVacancySource
 from src.ports.embedder import Embedder
 from src.ports.reranker import Reranker
-from src.ports.vacancy_normalizer import VacancyNormalizer
 from src.repositories.profile import ProfileRepository
 from src.repositories.prompt import PromptRepository
 from src.repositories.resume import ResumeRepository
@@ -63,6 +62,28 @@ class ConfigProvider(Provider):
     @provide(scope=Scope.APP)
     def settings(self) -> Settings:
         return get_settings()
+
+
+class AgentProvider(Provider):
+    @provide(scope=Scope.APP)
+    async def pool(
+        self,
+        settings: Settings,
+    ) -> AsyncIterator[AsyncConnectionPool]:
+        pool = AsyncConnectionPool(
+            conninfo=str(settings.database.url),
+            max_size=settings.database.pool_size,
+            open=False,
+        )
+        yield pool
+        await pool.close()
+
+    @provide(scope=Scope.APP) # Change if need different agents work simultaneously
+    async def checkpointer(
+        self,
+        pool: AsyncConnectionPool,
+    ) -> AsyncPostgresSaver:
+        return AsyncPostgresSaver(pool)
 
 
 class InfrastructureProvider(Provider):
@@ -170,12 +191,6 @@ class InfrastructureProvider(Provider):
 
     hh_source = provide(HhVacancySource, scope=Scope.APP)
     linkedin_source = provide(LinkedInVacancySource, scope=Scope.APP)
-    profile_analyzer = provide(ProfileAnalyzer, scope=Scope.REQUEST)
-    vacancy_normalizer = provide(
-        VacancyAnalyzer,
-        scope=Scope.REQUEST,
-        provides=VacancyNormalizer,
-    )
 
     @provide(scope=Scope.APP)
     def skill_canonicalizer(self) -> SkillCanonicalizer:

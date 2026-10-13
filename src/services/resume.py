@@ -5,10 +5,13 @@ from uuid import UUID
 
 from fastapi.exceptions import HTTPException
 
-from infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
+from src.agents.resume.schemas import WizardTurnOutput
+from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.document_parser.document_parser import DocumentParser
 from src.infrastructure.llm.llm import LLMProvider
 from src.infrastructure.models.resume import Resume, ResumeStatus, ResumeType
+from src.prompts.resume_wizard import RESUME_WIZARD_TURN_PROMPT
+from src.repositories.prompt import PromptRepository
 from src.schemas.resume import ResumeData
 
 
@@ -17,10 +20,12 @@ class ResumeService:
         self,
         unit_of_work: SqlAlchemyUnitOfWork,
         document_parser: DocumentParser,
+        prompts: PromptRepository,
         llm: LLMProvider,
     ):
         self._uow = unit_of_work
         self._document_parser = document_parser
+        self._prompts = prompts
         self._llm = llm
 
     async def _exctract_resume_data(self, filename: str, content: bytes) -> str:
@@ -66,38 +71,68 @@ class ResumeService:
             ) from e
 
         # Maybe in try block
-        resume = Resume(
+        resume = await self.master_resume_from_data(
+            profile_id=profile_id,
+            suffix=suffix,
+            content=content,
+            title=parsed.personal_info.title or "",
+            language=parsed.content_language,
+            raw_data=extracted,
+            data=parsed,
+        )
+
+        await self.save_resume(resume)
+
+        return resume
+
+    async def save_resume(
+        self,
+        resume: Resume,
+    ) -> Resume:
+        async with self._uow as uow:
+            await uow.resumes.create(resume)
+        return resume
+
+    async def prepare_resume_question(
+        self,
+        language: str,
+        current_section: str,
+        last_answer: str,
+        data: ResumeData,
+    ) -> WizardTurnOutput:
+        prompt = self._prompts.get("custom_key", RESUME_WIZARD_TURN_PROMPT) # Get the fucking rid of prompt repo
+        prompt = prompt[0].format(
+            output_language=language,
+            current_section=current_section,
+            resume_json=data.model_dump_json(),
+            answer_text=last_answer,
+        )
+        return await self._llm.complete(prompt, schema=WizardTurnOutput)
+
+    @staticmethod
+    async def master_resume_from_data(
+        profile_id: UUID,
+        suffix: str,
+        content: bytes,
+        title: str,
+        language: str,
+        raw_data: str,
+        data: ResumeData,
+    ) -> Resume:
+        return Resume(
             profile_id=profile_id,
             resume_type=ResumeType.MASTER,
             content=content,
             filename=suffix,
-            title=parsed.personal_info.title,
-            raw_data=extracted,
-            language=parsed.content_language,
-            processed_data=parsed.model_dump(mode="json"),
+            title=title,
+            raw_data=raw_data,
+            language=language,
+            processed_data=data.model_dump(mode="json"),
             status=ResumeStatus.COMPLETED,
         )
 
-        async with self._uow as uow:
-            await uow.resumes.create(resume)
-
-        return resume
-
-    async def create_base_resume(
+    async def get_resume_data(
         self,
         profile_id: UUID,
-        name: str,
-        language: str,
-        content: dict,
-    ) -> Resume:
-        resume = Resume(
-            profile_id=profile_id,
-            name=name,
-            language=language,
-            resume_type=ResumeType.BASE,
-            content=content,
-        )
-        async with self._uow as uow:
-            await uow.resumes.create(resume)
-
-        return resume
+    ) -> ResumeData:
+        await self._llm.complete()

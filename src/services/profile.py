@@ -2,8 +2,9 @@ from uuid import UUID
 
 from src.exceptions.profile import ProfileNotFoundError
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
+from src.infrastructure.llm.llm import LLMProvider
 from src.infrastructure.llm.profile_analyzer import ProfileAnalyzer
-from src.infrastructure.models.preference_intent import PreferenceIntent
+from src.infrastructure.models.preference import Preference
 from src.infrastructure.models.profile import AnalysisStatus, Profile
 
 
@@ -11,10 +12,10 @@ class ProfileService:
     def __init__(
         self,
         unit_of_work: SqlAlchemyUnitOfWork,
-        analyzer: ProfileAnalyzer,
+        llm: LLMProvider,
     ) -> None:
         self._uow = unit_of_work
-        self._analyzer = analyzer
+        self._llm = llm
 
     async def create(
         self,
@@ -42,7 +43,7 @@ class ProfileService:
         profile_id: UUID,
         *,
         enabled_only: bool = False,
-    ) -> list[PreferenceIntent]:
+    ) -> list[Preference]:
         async with self._uow as uow:
             return await uow.profiles.get_preferences_by_profile_id(
                 profile_id, enabled_only=enabled_only
@@ -52,7 +53,7 @@ class ProfileService:
         self,
         profile_id: UUID,
         preference_ids: list[UUID],
-    ) -> list[PreferenceIntent]:
+    ) -> list[Preference]:
         async with self._uow as uow:
             return await uow.profiles.get_preferences_by_ids(profile_id, preference_ids)
 
@@ -66,7 +67,10 @@ class ProfileService:
             profile.analysis_status = AnalysisStatus.PROCESSING
 
         try:
-            result = await self._analyzer.analyze(raw_story)
+            result = await self._llm.complete(
+                f"User story: {raw_story}",
+
+            )
         except Exception:
             await self._set_analysis_status(profile_id, AnalysisStatus.FAILED)
             raise
@@ -86,7 +90,7 @@ class ProfileService:
             )
             if not profile.preference_intents:
                 profile.preference_intents.extend(
-                    PreferenceIntent(
+                    Preference(
                         profile_id=profile.id,
                         **intent.model_dump(mode="json"),
                     )

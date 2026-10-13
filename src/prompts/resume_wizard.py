@@ -33,7 +33,9 @@ CURRENT DRAFT JSON:
 
 USER ANSWER:
 {answer_text}
+"""
 
+"""
 Output ONLY this JSON object and nothing else:
 {{
   "resume_data": {{

@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import Float
@@ -9,11 +9,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import DateTime, String, Text
 
 from src.infrastructure.models.base import Base
+from src.infrastructure.models.preference import Preference
 from src.infrastructure.models.resume import Resume
+from src.infrastructure.models.vacancy_match import VacancyMatch
 
-if TYPE_CHECKING:
-    from src.infrastructure.models.preference_intent import PreferenceIntent
-    from src.infrastructure.models.vacancy_match import VacancyMatch
 
 class AnalysisStatus(StrEnum):
     PENDING = "pending"
@@ -29,7 +28,7 @@ class Profile(Base):
     name: Mapped[str | None] = mapped_column(String(255))
     raw_story: Mapped[str] = mapped_column(Text, default="", nullable=False)
     profile_summary: Mapped[str | None] = mapped_column(Text)
-    analysis_status: Mapped[str] = mapped_column( # Maybe delete this
+    analysis_status: Mapped[str] = mapped_column(  # Maybe delete this
         String(30),
         default=AnalysisStatus.PENDING,
         nullable=False,
@@ -59,7 +58,7 @@ class Profile(Base):
         nullable=False,
     )
 
-    preference_intents: Mapped[list[PreferenceIntent]] = relationship(
+    preferences: Mapped[list[Preference]] = relationship(
         back_populates="profile",
         cascade="all, delete-orphan",
         passive_deletes=True,
