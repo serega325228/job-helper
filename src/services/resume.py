@@ -1,4 +1,5 @@
 import asyncio
+from fileinput import filename
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import UUID
@@ -50,11 +51,11 @@ class ResumeService:
     async def import_master_resume(
         self,
         profile_id: UUID,
-        suffix: str,
+        filename: str,
         content: bytes,
     ) -> Resume:
         try:
-            extracted = await self._exctract_resume_data(suffix, content)
+            extracted = await self._exctract_resume_data(filename, content)
 
             if not extracted.strip():
                 raise HTTPException(
@@ -71,12 +72,11 @@ class ResumeService:
             ) from e
 
         # Maybe in try block
-        resume = await self.master_resume_from_data(
+        resume = self.master_resume_from_data(
             profile_id=profile_id,
-            suffix=suffix,
-            content=content,
+            filename=filename,
             title=parsed.personal_info.title or "",
-            language=parsed.content_language,
+            language=parsed.content_language, # Should think about language
             raw_data=extracted,
             data=parsed,
         )
@@ -110,29 +110,21 @@ class ResumeService:
         return await self._llm.complete(prompt, schema=WizardTurnOutput)
 
     @staticmethod
-    async def master_resume_from_data(
+    def master_resume_from_data(
         profile_id: UUID,
-        suffix: str,
-        content: bytes,
         title: str,
         language: str,
-        raw_data: str,
         data: ResumeData,
+        filename: str | None = None,
+        raw_data: str | None = None,
     ) -> Resume:
         return Resume(
             profile_id=profile_id,
             resume_type=ResumeType.MASTER,
-            content=content,
-            filename=suffix,
+            filename=filename,
             title=title,
-            raw_data=raw_data,
+            raw_data=raw_data, # DON'T DELETE THIS FUCKING RAW_DATA
             language=language,
             processed_data=data.model_dump(mode="json"),
             status=ResumeStatus.COMPLETED,
         )
-
-    async def get_resume_data(
-        self,
-        profile_id: UUID,
-    ) -> ResumeData:
-        await self._llm.complete()

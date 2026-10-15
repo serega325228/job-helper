@@ -13,10 +13,12 @@ from crawlee.events import LocalEventManager
 from crawlee.storage_clients._file_system import FileSystemStorageClient
 from dishka import FromComponent, Provider, Scope, provide
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.graph.state import CompiledStateGraph
 from playwright.async_api import Playwright, async_playwright
 from psycopg_pool.pool_async import AsyncConnectionPool
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agents.resume.graph import create_resume_agent
 from src.config.settings import (
     Settings,
     get_settings,
@@ -84,6 +86,13 @@ class AgentProvider(Provider):
         pool: AsyncConnectionPool,
     ) -> AsyncPostgresSaver:
         return AsyncPostgresSaver(pool)
+
+    @provide(scope=Scope.APP)
+    async def resume_agent(
+        self,
+        checkpointer: AsyncPostgresSaver,
+    ) -> CompiledStateGraph:
+        return create_resume_agent(checkpointer)
 
 
 class InfrastructureProvider(Provider):

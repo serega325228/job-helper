@@ -65,7 +65,7 @@ class AdditionalInfo(BaseModel):
 class ResumeData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    content_language: ResumeLanguage = Field(default=ResumeLanguage.EN)
+    #content_language: ResumeLanguage = Field(default=ResumeLanguage.EN)
     personal_info: PersonalInfo
     summary: str | None = None
     work_experience: list[WorkExperience] = Field(default_factory=list)

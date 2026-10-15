@@ -1,4 +1,30 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+# Create profile data schema
+class ProfileData(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    name: str
+    raw_story: str = Field(Text)
+    profile_summary: Mapped[str | None] = mapped_column(Text)
+    analysis_status: Mapped[str] = mapped_column(  # Maybe delete this
+        String(30),
+        default=AnalysisStatus.PENDING,
+        nullable=False,
+        index=True,
+    )
+
+    skills: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    experience: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    education: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    seniority: Mapped[str | None] = mapped_column(String(50), index=True)
+    experience_years: Mapped[float | None] = mapped_column(Float)
+    contacts: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        default=dict,
+        nullable=False,
+    )
 
 
 class PreferenceIntentAnalysis(BaseModel):

@@ -18,4 +18,5 @@ class WizardTurnOutput(BaseModel):
     resume_data: ResumeData
     next_question: NextQuestion
     inferred_skills: list[str] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
     is_complete: bool = False
