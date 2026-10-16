@@ -1,12 +1,11 @@
 import asyncio
-from fileinput import filename
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import UUID
 
 from fastapi.exceptions import HTTPException
 
-from src.agents.resume.schemas import WizardTurnOutput
+from src.agents.resume.schemas import ResumeOutput
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.document_parser.document_parser import DocumentParser
 from src.infrastructure.llm.llm import LLMProvider
@@ -99,7 +98,7 @@ class ResumeService:
         current_section: str,
         last_answer: str,
         data: ResumeData,
-    ) -> WizardTurnOutput:
+    ) -> ResumeOutput:
         prompt = self._prompts.get("custom_key", RESUME_WIZARD_TURN_PROMPT) # Get the fucking rid of prompt repo
         prompt = prompt[0].format(
             output_language=language,
@@ -107,7 +106,7 @@ class ResumeService:
             resume_json=data.model_dump_json(),
             answer_text=last_answer,
         )
-        return await self._llm.complete(prompt, schema=WizardTurnOutput)
+        return await self._llm.complete(prompt, schema=ResumeOutput)
 
     @staticmethod
     def master_resume_from_data(

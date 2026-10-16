@@ -1,11 +1,13 @@
+import json
 from uuid import UUID
 
-from src.agents.resume.schemas import WizardTurnOutput
+from src.agents.profile.schemas import ProfileOutput
 from src.exceptions.profile import AnalysisError, ProfileNotFoundError
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.llm.llm import LLMProvider
 from src.infrastructure.models.preference import Preference
 from src.infrastructure.models.profile import AnalysisStatus, Profile
+from src.prompts.profile import PROFILE_ANALYSIS_PROMPT
 from src.prompts.resume_wizard import RESUME_WIZARD_ANALYZE_PROFILE_PROMPT
 from src.repositories.prompt import PromptRepository
 from src.schemas.profile import ProfileData
@@ -63,25 +65,43 @@ class ProfileService:
         async with self._uow as uow:
             return await uow.profiles.get_preferences_by_ids(profile_id, preference_ids)
 
-
     # Fix this too
-    async def analyze_story(self, profile_id: UUID) -> Profile:
-        async with self._uow as uow:
-            profile = await uow.profiles.get_by_id(profile_id)
-            if profile is None:
-                raise ProfileNotFoundError(profile_id)
-
-            raw_story = profile.raw_story
-            profile.analysis_status = AnalysisStatus.PROCESSING
-
+    async def analyze_data(
+        self,
+        profile_id: UUID,
+        language: str,
+        data: ProfileData,
+        last_answer: str,
+    ) -> ProfileOutput:
         try:
-            result = await self._llm.complete(
-                f"User story: {raw_story}",
+            async with self._uow as uow:
+                profile = await uow.profiles.get_by_id(profile_id)
+                if profile is None:
+                    raise ProfileNotFoundError(profile_id)
+
+                raw_data = profile.raw_data
+                profile.analysis_status = AnalysisStatus.PROCESSING
+
+            prompt = self._prompts.get(
+                "custom_key",
+                PROFILE_ANALYSIS_PROMPT,
+            )
+            prompt = prompt[0].format(
+                output_language=language,
+                raw_data=raw_data,
+                profile_json=data.model_dump_json(),
+                answer_text=last_answer,
+            )
+            return await self._llm.complete(  # Think about changing simple prompt to a system prompt everywhere
+                prompt,
+                schema=ProfileOutput,
             )
         except Exception:
             await self._set_analysis_status(profile_id, AnalysisStatus.FAILED)
             raise
 
+    # Add updating/saving profile
+    async def update_profile(self, profile: Profile) -> Profile:
         async with self._uow as uow:
             profile = await uow.profiles.get_by_id(profile_id)
             if profile is None:
@@ -115,22 +135,22 @@ class ProfileService:
         last_answer: str,
         resume_data: ResumeData,
         profile_data: ProfileData,
-    ) -> WizardTurnOutput:
+    ) -> ProfileOutput:
         try:
-            profile = await self.get_profile(profile_id)
-            if not profile:
-                raise ProfileNotFoundError(profile_id)
-
-            prompt = self._prompts.get("custom_key", RESUME_WIZARD_ANALYZE_PROFILE_PROMPT) # Get the fucking rid of prompt repo
+            prompt = self._prompts.get(
+                "custom_key", RESUME_WIZARD_ANALYZE_PROFILE_PROMPT
+            )  # Get the fucking rid of prompt repo
             prompt = prompt[0].format(
                 output_language=language,
                 current_section=current_section,
                 resume_json=resume_data.model_dump_json(),
                 profile_json=profile_data.model_dump_json(),
+                # Think about validating this info with ProfileData schema,
+                # but maybe unnecessary because it's already validated
                 answer_text=last_answer,
             )
 
-            return await self._llm.complete(prompt, schema=WizardTurnOutput)
+            return await self._llm.complete(prompt, schema=ProfileOutput)
 
         except Exception as e:
             raise AnalysisError(e)

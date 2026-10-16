@@ -1,8 +1,7 @@
+import json
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID
-import json
-
 
 from dishka import FromDishka
 from dishka.integrations.fastapi import inject
@@ -28,7 +27,7 @@ router = APIRouter(prefix="resume", tags=["Resume"])
 async def import_master_resume(
     file: Annotated[UploadFile, File()],
     profile_id: Annotated[UUID, Path()],
-    resume_service: FromDishka[ResumeService]
+    resume_service: FromDishka[ResumeService],
 ):
     logger.info("Uploading master resume")
 
@@ -60,7 +59,6 @@ async def import_master_resume(
             content=content,
         )
 
-
     except ValueError as e:
         raise HTTPException(
             status_code=500,
@@ -68,6 +66,7 @@ async def import_master_resume(
         ) from e
 
     logger.info("Master resume imported successfully")
+
 
 # Move to wizard router
 async def event_stream(
@@ -87,16 +86,17 @@ async def event_stream(
         version="v2",
     ):
         if chunck["type"] == "messages":
-            yield f"data: {json.dumps({"type": "token", "content": chunck["data"]})}\n\n"
+            yield f"data: {json.dumps({'type': 'token', 'content': chunck['data']})}\n\n"
         elif chunck["type"] == "updates":
             for node_name, state in chunck["data"].items():
-                yield f"data: {json.dumps({"type": "node_update", "node": node_name, "state": state})}\n\n"
+                yield f"data: {json.dumps({'type': 'node_update', 'node': node_name, 'state': state})}\n\n"
 
         if "__interrupt__" in chunck.get("data", {}):
             interrupt_data = chunck["data"]["__interrupt__"][0]
-            yield f"data: {json.dumps({"type": "interrupt", "data": interrupt_data.value})}\n\n"
+            yield f"data: {json.dumps({'type': 'interrupt', 'data': interrupt_data.value})}\n\n"
 
     yield "data: [DONE]\n\n"
+
 
 @router.post("/wizard/stream")
 async def stream_wizard(thread_id: str, answer: str = ""):

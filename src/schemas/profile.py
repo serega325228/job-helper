@@ -1,33 +1,35 @@
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.types import JsonValue
 
 
-# Create profile data schema
+# Update schema using specific types for fields
 class ProfileData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     name: str
-    raw_story: str = Field(Text)
-    profile_summary: Mapped[str | None] = mapped_column(Text)
-    analysis_status: Mapped[str] = mapped_column(  # Maybe delete this
-        String(30),
-        default=AnalysisStatus.PENDING,
-        nullable=False,
-        index=True,
-    )
+    raw_data: str
+    processed_data: dict
+    profile_summary: str # Import field, there should be pretty formatted user story/lore
+    # analysis_status: Mapped[str] = mapped_column(  # Maybe delete this
+    #     String(30),
+    #     default=AnalysisStatus.PENDING,
+    #     nullable=False,
+    #     index=True,
+    # )
 
-    skills: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
-    experience: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
-    education: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
-    seniority: Mapped[str | None] = mapped_column(String(50), index=True)
-    experience_years: Mapped[float | None] = mapped_column(Float)
-    contacts: Mapped[dict[str, Any]] = mapped_column(
-        JSONB,
-        default=dict,
-        nullable=False,
-    )
+    skills: list[str] = Field(default_factory=list)
+    experience: list[str] = Field(default_factory=list)
+    education: list[str] = Field(default_factory=list)
+    seniority: str | None = None
+    experience_years: float | None = None
+    contacts: dict[str, Any] = Field(default_factory=dict)
+    custom_sections: dict[str, JsonValue] = Field(default_factory=dict)
+    section_meta: dict[str, JsonValue] = Field(default_factory=dict) # Maybe delete
 
 
-class PreferenceIntentAnalysis(BaseModel):
+class PreferenceAnalysis(BaseModel):
     name: str
     description: str | None = None
     target_titles: list[str] = Field(default_factory=list)
@@ -53,7 +55,7 @@ class ProfileAnalysis(BaseModel):
     education: list[str] = Field(default_factory=list)
     seniority: str | None = None
     experience_years: float | None = Field(default=None, ge=0)
-    preference_intents: list[PreferenceIntentAnalysis] = Field(
+    preference_intents: list[PreferenceAnalysis] = Field(
         default_factory=list,
     )
     missing_information: list[str] = Field(default_factory=list)

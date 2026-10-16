@@ -14,7 +14,7 @@ class NextQuestion(BaseModel):
     text: str
     section: Section
 
-class WizardTurnOutput(BaseModel):
+class ResumeOutput(BaseModel):
     resume_data: ResumeData
     next_question: NextQuestion
     inferred_skills: list[str] = Field(default_factory=list)

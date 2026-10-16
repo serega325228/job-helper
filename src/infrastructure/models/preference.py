@@ -26,7 +26,7 @@ class Preference(Base):
         index=True,
     )
 
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    general_title: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     target_titles: Mapped[list[str]] = mapped_column(
         JSONB,

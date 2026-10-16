@@ -67,7 +67,7 @@ class ResumeData(BaseModel):
 
     #content_language: ResumeLanguage = Field(default=ResumeLanguage.EN)
     personal_info: PersonalInfo
-    summary: str | None = None
+    summary: str | None = None # Maybe delete this too
     work_experience: list[WorkExperience] = Field(default_factory=list)
     education: list[Education] = Field(default_factory=list)
     personal_projects: list[PersonalProject] = Field(default_factory=list)

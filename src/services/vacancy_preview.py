@@ -5,7 +5,7 @@ from uuid import UUID
 
 from src.exceptions.profile import ProfileNotFoundError
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
-from src.infrastructure.models.preference_intent import PreferenceIntent
+from src.infrastructure.models.preference import Preference
 from src.infrastructure.models.profile import Profile
 from src.infrastructure.models.vacancy import VacancyBatch
 from src.infrastructure.models.vacancy_preview import PreviewCollection
@@ -62,7 +62,7 @@ class VacancyPreviewEvaluator:
         self,
         preview: VacancyPreview,
         profile: Profile,
-        preferences: list[PreferenceIntent],
+        preferences: list[Preference],
         filters: VacancyHardFilters,
         query: VacancyScrapingQuery,
     ) -> bool:
@@ -169,7 +169,7 @@ class VacancyPreviewEvaluator:
     def matches_preference(
         self,
         preview: VacancyPreview,
-        preference: PreferenceIntent,
+        preference: Preference,
     ) -> bool:
         if any(_contains(title, preview.title) for title in preference.excluded_titles):
             return False
@@ -215,7 +215,7 @@ class VacancyPreviewEvaluator:
     @staticmethod
     def relevant(
         preview: VacancyPreview,
-        preferences: list[PreferenceIntent],
+        preferences: list[Preference],
         query: VacancyScrapingQuery,
     ) -> bool:
         terms = [

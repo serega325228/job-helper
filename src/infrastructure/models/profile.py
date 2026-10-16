@@ -26,8 +26,9 @@ class Profile(Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     name: Mapped[str | None] = mapped_column(String(255))
-    raw_story: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    profile_summary: Mapped[str | None] = mapped_column(Text)
+    raw_data: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    processed_data: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=True)
+    profile_summary: Mapped[str | None] = mapped_column(Text) # Maybe delete this too
     analysis_status: Mapped[str] = mapped_column(  # Maybe delete this
         String(30),
         default=AnalysisStatus.PENDING,
