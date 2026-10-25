@@ -2,6 +2,7 @@
 
 import re
 from collections import Counter
+
 from structlog import get_logger
 
 from src.config.settings import RefinerSettings

@@ -25,7 +25,7 @@ from src.schemas.resume import (
 )
 from src.services.skill_canonicalization import SkillCanonicalizer
 
-Strategy = Literal["nudge", "keywords", "full"]
+Strategy = Literal["nudge", "keywords", "cheat"]
 _REPLACE_PATH = re.compile(
     r"summary|(?:workExperience|personalProjects)\[\d+\]\.description\[\d+\]"
     r"|education\[\d+\]\.description"
@@ -57,13 +57,13 @@ class ImproverService:
     @staticmethod
     def resume_text(resume: ResumeData) -> str:
         parts = [resume.summary or "", *resume.additional.technicalSkills]
-        for entry in resume.workExperience:
+        for entry in resume.work_experience:
             parts.extend([entry.title or "", *entry.description])
-        for entry in resume.personalProjects:
+        for entry in resume.personal_projects:
             parts.extend([entry.name or "", entry.role or "", *entry.description])
         for entry in resume.education:
             parts.extend([entry.degree or "", entry.description or ""])
-        for section in resume.customSections.values():
+        for section in resume.custom_sections.values():
             if not isinstance(section, dict):
                 continue
             text = section.get("text")

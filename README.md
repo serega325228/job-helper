@@ -1,314 +1,419 @@
-# Job Helper
+# Job Helper — Design Decisions
 
-## Runtime configuration
+This file replaces the previous README. It records chosen approaches, their
+reasons, and proposals awaiting agreement. It is not a claim that the described
+features are implemented.
 
-The frontend supplies LLM connection details, generation parameters, and feature
-switches. They are persisted in `data/config.json` (under `Settings.app.data_dir`).
-`LLMConfigManager` validates and loads that file into `LLMSettings.config` and
-`Settings.features` at startup. These runtime values are excluded from environment
-loading. An absent file leaves both sections unconfigured; there are no fallback
-model, token-budget, temperature, or feature values.
+## Status conventions
 
-Updates use one process-local lock and an atomic file replacement. Runtime settings
-change only after saving succeeds. Each HTTP request receives its own `LLMProvider`
-with a copy of the configuration and credentials, so changing settings does not
-reroute an in-flight request. Run one backend process for this file-based store;
-multiple workers require shared transactional storage.
+- **Accepted**: explicitly agreed direction.
+- **Proposed**: recommendation, not yet an implementation commitment.
+- **Open**: needs a product decision or user clarification.
 
-Provider keys are encrypted using the existing `SecurityService`; back up
-`data/.secret_key` with the configuration file. Invalid files and unreadable keys
-raise errors without overwriting saved data. Configuration responses mask keys.
+## Product direction — described by the user
 
-The following paths are relative to the API prefix:
+A local AI-assisted job-search and application workspace. Users connect an LLM
+through LiteLLM. Local hosting does not necessarily mean local inference.
 
-- `POST /config/api-keys`: set provider keys; an empty string deletes a key.
-  `gemini` is canonical; `google` remains an accepted input alias.
-- `GET /config/llm-api-key`: read the masked configuration, or `null` before setup.
-- `PUT /config/llm-api-key`: replace the complete LLM configuration. Credentials
-  come from the provider-key store. Local providers may run without credentials.
-- `GET /config/features`: read feature settings, or `null` before setup.
-- `PUT /config/features`: replace all four feature switches.
-- `POST /config/llm-test`: test saved settings, or a complete candidate body with
-  an optional `api_key` override. The structured-output probe never saves or
-  activates the candidate. Saving configuration does not make a paid test call.
+Intended workflows:
 
-Example LLM input (the numbers here are submitted values, not server defaults):
+- Import an existing master resume, or tell a personal/professional story, to
+  build a profile. Suggest preferences from that material for user review.
+- Search aggregators using preferences and additional filters; inspect previews
+  before paying the cost of detailed scraping and evaluation.
+- Show up to 50 suitable vacancies, with explanations of suitability and gaps.
+- Accept pasted vacancy text through the same normalization/evaluation pipeline.
+- Improve a master resume or tailor a resume, cover letter, outreach message, and
+  interview preparation to a vacancy; allow manual review and template-based PDF
+  export, including Russian-market layouts.
 
-```json
-{
-  "provider": "ollama",
-  "model": "your-installed-model",
-  "api_base": "http://localhost:11434",
-  "max_tokens": 4096,
-  "temperature": null,
-  "reasoning_effort": null,
-  "api_version": null
-}
+Ideas under consideration, not settled implementation choices:
+
+- Embedding retrieval, reranking, and Laya evaluation, and which are necessary.
+- Three editing modes: light rewording, enrichment from profile evidence, and a
+  requested experimental mode that permits invented/changed facts.
+- Multilingual style refinement, Crawl4AI for company sites, and a kanban-like
+  application tracker. Automatic submission is not yet a specified workflow.
+
+## D001 — Keep a decision log here
+
+**Status: Accepted.**
+
+Record each decision with its status, approach, reasons, and important trade-offs.
+Keep proposals distinct from implemented behavior. Do not describe unimplemented
+endpoints, filters, or deployment commands as working features.
+
+**Reason:** the previous README had drifted from the code, making it an unreliable
+source of truth.
+
+## D002 — Natural-language preferences become validated drafts
+
+**Status: Proposed.**
+
+Users can enter preferences such as:
+
+- `AI engineer`
+- `ML engineer`
+- `Golang engineer $400k/year FAANG`
+
+Use this flow:
+
+```text
+User text
+  -> LLM structured extraction
+  -> deterministic validation and taxonomy/company resolution
+  -> editable preview with assumptions and clarification questions
+  -> user confirmation
+  -> application service persists the preference
 ```
 
-`temperature` is required: use a number from 0 to 2, or `null` to omit the parameter.
-Ollama, OpenAI-compatible servers, and Azure Foundry require an explicit endpoint.
-Other providers use their standard endpoint when `api_base` is null. Provider
-credentials and endpoints do not fall back to environment variables. Unknown
-models can be saved and tested; known unsupported parameters and token limits
-are rejected. Timeouts and retry counts remain server-owned `LLMSettings` fields.
+The LLM returns a strict Pydantic draft, not ORM objects, SQL, or database writes.
+It can select existing taxonomy IDs or flag an unresolved role; it cannot silently
+create canonical roles. Validate IDs, enum values, monetary amounts, and constraint
+semantics in application code. Treat the input as data, not instructions.
 
-Example feature input:
+Store the original text, confirmed structured interpretation, and interpretation
+version. Keep assumptions/questions in the draft; do not activate unresolved hard
+constraints. Ordinary edits should not require another LLM call unless the user
+asks to reinterpret the text.
 
-```json
-{
-  "enable_cover_letter": true,
-  "enable_outreach_message": false,
-  "enable_interview_prep": true,
-  "allow_unverified_skills": false
-}
+**Reasons:** free text is convenient, structured fields are filterable, and user
+confirmation prevents invented requirements from becoming invisible filters.
+An LLM is useful for interpretation, not as the authority on user intent.
+
+## D003 — Separate roles, skills, seniority, and conditions
+
+**Status: Proposed.**
+
+A preference is a search intent, not just a job title. Its conceptual shape is:
+
+- Identity: ID, profile ID, display label, original text, enabled flag, weight.
+- Role targets: canonical role IDs and optional explicit title phrases.
+- Specialization: required/preferred skills, such as Go or Python.
+- Seniority: optional bounds, separate from the role identity.
+- Conditions: compensation, location, work format, employment type, companies.
+- Policy: which conditions are hard requirements versus ranking preferences.
+- Unresolved meaning: retained in the draft until clarified.
+
+For example, `Golang engineer` usually suggests a backend/software engineering
+role with Go specialization. Do not create a new canonical role for every
+language, seniority, company, and salary combination. Show this interpretation
+for confirmation; a Go role is not necessarily backend work.
+
+Do not populate the candidate's demonstrated skills from desired job preferences.
+A user can want an ML job without already having every ML skill.
+
+**Reasons:** role identity stays stable, the title catalog stays manageable, and
+skills/conditions can be evaluated independently instead of being hidden in text.
+
+## D004 — A small, curated, versioned title taxonomy
+
+**Status: Proposed.**
+
+Start with a checked-in catalog, for example `data/job_roles.json` (not yet
+created). Load it through one taxonomy service shared by preference parsing,
+source-query generation, vacancy normalization, and autocomplete.
+
+Each role should have:
+
+- Stable ID, e.g. `ai_engineer`, `ml_engineer`, `backend_engineer`.
+- Display label and a short definition.
+- Curated aliases, with locale where relevant.
+- Explicit related roles, which are not automatically equivalent.
+
+Example distinction:
+
+| Role ID | Display label | Example aliases |
+| --- | --- | --- |
+| `ai_engineer` | AI Engineer | Artificial Intelligence Engineer |
+| `ml_engineer` | Machine Learning Engineer | ML Engineer |
+| `backend_engineer` | Backend Engineer | Backend Developer, Back-end Engineer |
+
+These are seed examples, not a complete occupational classification. AI Engineer
+and ML Engineer are related roles, not guaranteed synonyms. Broad terms such as
+`Software Engineer` may remain ambiguous until a description is available.
+
+Keep title aliases separate from skill aliases (`Golang` -> `Go`). A title such
+as `Senior Golang Backend Engineer` can suggest role `backend_engineer`, seniority
+`senior`, and skill `Go`; preserve the original title and evidence for each hint.
+A title can suggest multiple roles rather than being forced into exactly one.
+
+Use deterministic normalization and curated phrase/token matching first. Account
+for punctuation and language-specific boundaries; do not use unrestricted
+substring matching. Optionally use embeddings for uncertain cases after measuring
+whether they improve recall. Use the LLM to suggest catalog changes from unmatched
+titles in batches, with review before publishing them.
+
+**Reasons:** stable IDs support reproducible matching and user-visible labels.
+A curated catalog prevents spelling variants and LLM inventions from fragmenting
+roles. A file is sufficient for an MVP; use database-backed catalog management
+only if live editing or multiple maintainers make it worthwhile. ESCO/O*NET may
+later supply external mappings, but are not required to start.
+
+## D005 — Retrieval is broad; final matching is evidence-based
+
+**Status: Proposed.**
+
+Distinguish three concepts:
+
+1. **Source queries:** strings/filters supported by a job board, used to retrieve
+   candidates. Build them from role aliases and relevant specialization terms.
+2. **Preview classification:** cheap title/snippet/company checks to decide which
+   descriptions are worth fetching.
+3. **Detailed evaluation:** normalized job facts evaluated against confirmed
+   constraints, followed by ranking.
+
+Scrape listing previews first, persist/deduplicate them, then decide which detail
+pages to fetch. Do not require exact canonical-title equality. Apply title matching
+as a high-recall gate:
+
+- **Likely match:** known role/title alias and compatible visible qualifiers.
+- **Uncertain:** broad, unfamiliar, or underspecified title; keep eligible for a
+  bounded detail-fetch/review budget instead of silently rejecting it.
+- **Mismatch:** clear incompatible role or a confirmed exclusion supported by
+  available evidence.
+
+Do not make an LLM call for every preview in the initial implementation. Use the
+same normalized role representation on preferences and vacancies. An embedding
+score is a ranking signal, not proof that a hard requirement passed.
+
+**Reasons:** titles vary across employers, and previews often omit salary,
+technology, seniority, and even useful role details. Exact-title-only filtering
+loses relevant jobs; full-description scraping of every result wastes resources.
+
+## D006 — Preserve alternatives and uncertainty explicitly
+
+**Status: Proposed.**
+
+Separate preference entries are alternatives (OR). Within one preference,
+confirmed hard conditions combine with AND. Role targets within one preference
+are alternatives unless the user explicitly asks otherwise. Soft conditions
+influence ranking rather than eligibility.
+
+For example:
+
+```text
+AI engineering preference
+OR ML engineering preference
+OR (confirmed Go role AND confirmed compensation rule AND confirmed company rule)
 ```
 
-Incomplete or invalid input returns 422. Operations requiring missing configuration
-return `409 configuration_required`. Feature switches must be actual JSON booleans.
-Language, tailoring-strategy, and custom-prompt endpoints remain available. Custom
-cover-letter/outreach templates must contain `{job_description}`, `{resume_data}`,
-and `{output_language}` and cannot use other placeholders or attribute access.
-The legacy database-reset endpoint returns 501 after confirmation; its database
-implementation remains outside this refactor.
+Evaluate hard conditions using `pass`, `fail`, or `unknown`:
 
-## Resume generation
+- Reject a confirmed hard mismatch.
+- Missing evidence is unknown, not a failure or an automatic pass.
+- Unknown preview facts remain eligible for detailed evaluation.
+- Unresolved facts after detail processing remain visibly unknown; never label
+  them as satisfying all requirements. Support an explicit strict-results view.
 
-`ImproverService`, `RefinerService`, `InterviewPrepService`, and `CoverLetterService`
-accept `ResumeData` rather than arbitrary dictionaries. Pass a `FeatureConfig`
-snapshot explicitly into operations that depend on feature switches. Keyword
-extraction returns `JobKeywords`; structured LLM output is validated by the provider.
+Persist the preview/vacancy-to-preference association and match reasons. One job
+may match several preferences. Fetch and normalize it once, then evaluate each
+preference separately. A UI may choose a best match without discarding the others.
 
-Improvement proposes targeted edits and applies only permitted action/path pairs.
-Identity fields, dates, metadata, and section membership are preserved. Reorders
-must preserve every item and duplicate. Keyword refinement uses the same patch
-validator. Full-resume regeneration and the separate LLM skill-planning pass are
-removed.
+**Reasons:** global filters must not accidentally turn alternatives into a single
+impossible query, and one early winning preference must not hide another valid
+match. Explanations make both false positives and false negatives diagnosable.
 
-Results include applied and rejected changes, warnings, and typed improvement
-suggestions. Applied suggestions describe accepted edits; recommendations describe
-remaining gaps. Nothing is reported as improved when no change occurred.
+## D007 — Compensation and company groups need explicit meaning
 
-**Allow unverified skills** permits adding skills explicitly mentioned in the job
-description without evidence in the master resume. These additions are labeled
-unverified and survive refinement under the same policy. They cannot authorize
-invented work history, qualifications, or metrics. Normal mode requires resume
-evidence. Evidence checks use skill aliases and term matching, not a semantic proof
-of proficiency; metric warnings and edit review still matter.
+**Status: Proposed; interpretation of the example remains open.**
 
-## Vacancy matching
+For `Golang engineer $400k/year FAANG`, the draft can extract Go, the amount
+400,000, annual period, and the company-group phrase. It should ask:
 
-Vacancy processing uses Taskiq and RabbitMQ. The collection and matching
-LangGraph workflows have been removed; resume and supervisor agents remain separate.
+- Is $400k a minimum, target, or approximate range?
+- Which dollar currency is intended? USD can be suggested, not silently asserted.
+- Is this base salary, cash compensation, or total compensation including equity?
+- Is it gross or net, and is compensation a hard condition or a preference?
+- Does FAANG mean its literal members or a broader group of large tech companies?
 
-Detailed processing persists raw details, normalizes them, creates embeddings,
-and selects the existing top `rerank_limit` candidates (40 by default, with
-`search_limit=100`). There was no percentage setting in the previous matcher.
-Only that shortlist is reranked. Every successfully parsed vacancy receives a new
-Laya evaluation using its full description and parsed conditions, including
-vacancies outside the shortlist. Those vacancies finish as `filtered`; shortlisted
-vacancies receive final scores and a `VacancyMatch` and finish as `completed`.
+Represent compensation with amount/range, currency, period, basis, tax treatment,
+and hard/soft policy. Unknown basis stays unknown. Do not compare base salary
+against total compensation or currencies without an explicit conversion policy.
+Do not invent an annualization rule for hourly compensation.
 
-Laya's `none`, `weak`, `good`, and `strong` labels map to `0`, `1/3`, `2/3`,
-and `1`. Existing final geometric score weights and match categories are retained.
-A zero component makes the combined score zero. Labels and numeric scores are
-saved in `component_scores.laya`; full vacancy rows also retain their evaluation
-and final scores. These ordinal values need calibration against labeled matches.
+Represent employer groups separately from role titles. A curated FAANG group can
+resolve employer aliases to stable company IDs (Meta/Facebook, Alphabet/Google,
+Amazon, Apple, Netflix). Display its membership during confirmation. Never equate
+"big tech" with that exact group without asking.
 
-## Embedding and reranking backends
+**Reasons:** otherwise the parser can turn an ambiguous sentence into a precise
+but wrong database filter and reject nearly every vacancy.
 
-`Embedder` and `Reranker` protocols in `src/ports` let services use either backend.
-Both default to `llama_server`. The previous `EmbeddingService` lives in
-`src/infrastructure/embedder/local.py`; the previous `VacancyReranker` remains
-in `src/infrastructure/reranker/local.py`. Local libraries are imported
-only when their backend is selected. DI owns and closes the HTTP clients and the
-local embedding model.
+## D008 — Separate candidate facts from resume documents
 
-Configure independent servers in `.env` (URLs are server roots, without `/v1`):
+**Status: Proposed.**
 
-```dotenv
-EMBEDDING_BACKEND=llama_server
-EMBEDDING_BASE_URL=http://localhost:8081
-EMBEDDING_SERVER_MODEL_NAME=Qwen3-Embedding-0.6B-Q8_0.gguf
-RERANKER_BACKEND=llama_server
-RERANKER_BASE_URL=http://localhost:8082
-RERANKER_SERVER_MODEL_NAME=Qwen3-Reranker-0.6B-Q8_0.gguf
+Treat the profile as the confirmed fact base; master and tailored resumes are
+versioned presentations of it, not independent sources that silently overwrite
+one another. Imported resumes and stories create candidate facts with source
+references and review status. Model inferences remain distinguishable from user
+statements and confirmations. Preference suggestions require confirmation too.
+
+A profile may contain more detail than any one resume. Missing content in an
+import is not evidence that an existing fact should be deleted. Conflicts and
+material changes should be reviewed. Do not promote generated resume statements
+back into confirmed profile facts automatically.
+
+Keep an explicit resume-profile revision link and a way to review intentional
+manual edits; one fact base must not become an excuse to overwrite user drafts.
+
+**Reasons:** otherwise inference and generated claims can become their own
+"evidence", successive tailoring passes drift, and importing a short resume loses
+useful candidate history.
+
+## D009 — Suitability, document alignment, and parsing quality are different
+
+**Status: Proposed.**
+
+Show separate dimensions rather than one authoritative "ATS percentage":
+
+- Job suitability: preference constraints and candidate qualifications, evaluated
+  from the confirmed profile and vacancy facts.
+- Resume-to-job alignment: how well this document expresses relevant evidence.
+- Document parseability: reading order, text extraction, sections, and formatting.
+
+None is a validated probability of passing an employer's ATS or receiving an
+interview. Internal scores should expose components, missing facts, and reasons.
+Tailoring can improve document alignment without improving real qualifications.
+
+For before/after comparisons, freeze the vacancy revision, profile revision,
+scorer/prompt/model versions, and scoring configuration. Re-evaluate both resume
+versions under that same setup. Record absolute alignment scores separately from
+cohort-relative ranking; changing the search cohort must not masquerade as a
+resume improvement. Language changes and model nondeterminism also affect scores.
+
+**Reasons:** keyword stuffing or invented qualifications can game self-evaluation,
+and changing models or baselines produces misleading improvement claims.
+
+## D010 — One ingestion pipeline, progressively more expensive evaluation
+
+**Status: Proposed.**
+
+All adapters, including pasted vacancy text, converge on a versioned raw vacancy
+and one normalized vacancy schema. Manual input bypasses discovery, not validation
+or evaluation. Preserve source text and distinguish unknown from extracted facts.
+
+Recommended baseline:
+
+```text
+Search queries / company listings
+  -> persist and deduplicate previews
+  -> cheap role relevance + known hard constraints
+  -> bounded detailed scraping
+  -> normalization and confirmed constraint checks
+  -> inexpensive structured/profile and resume-alignment assessment
+  -> optional semantic reranking / Laya
+  -> persist explanations and show up to 50 results
 ```
 
-Each backend also accepts `*_API_KEY` for optional Bearer authentication,
-`*_REQUEST_TIMEOUT_SECONDS` (default 120), and `*_BATCH_SIZE` (default 16).
-HTTP connection pools live in the Dishka `hh`, `embedding`, and `reranker`
-components. Each client uses its own service settings, stays cached at
-`Scope.APP`, and is closed by its async generator when the container closes.
-Consumers select their client with
-`Annotated[httpx.AsyncClient, FromComponent("hh")]` (or `"embedding"`/`"reranker"`).
-HH's timeout no longer controls clients for the model services.
-Nested `EMBEDDING__...` and `RERANKER__...` settings are also supported. When the
-application runs in Docker, use server container hostnames and their internal
-ports instead of `localhost`.
+Embeddings, reranking, and Laya are independent optional stages until evaluation
+shows their incremental value. Embeddings are useful when a large stored corpus
+needs cheap semantic retrieval; an ANN/vector stage is not a prerequisite for
+scoring a small fresh batch. Add reranking or Laya separately, measuring relevance,
+recall loss, latency, memory, and inference cost against a simple baseline. A top-K
+cut before a later model is a recall trade-off and must be measured.
 
-For example, run the two CPU servers with the official llama.cpp Docker image:
+Do not pad the list with unsuitable jobs to reach 50. Preserve results outside the
+first page and rejection reasons for inspection. Support cancellation, per-run
+budgets, retries, and stage replay without duplicate work.
 
-```sh
-docker run --rm -p 8081:8080 -v "$PWD/.models:/models:ro" \
-  ghcr.io/ggml-org/llama.cpp:server \
-  -m /models/Qwen3-Embedding-0.6B-Q8_0.gguf \
-  --alias Qwen3-Embedding-0.6B-Q8_0.gguf \
-  --embedding --pooling last --host 0.0.0.0 --port 8080 \
-  --ctx-size 8192 --batch-size 8192 --ubatch-size 8192 --parallel 1
+Keep source integrations behind adapters. Prefer stable official APIs and ATS
+feeds when available. Evaluate Crawl4AI as a fetching/extraction implementation
+for company pages, not a replacement for identity validation, pagination, dedup,
+filtering, or job-fact normalization. Reuse existing browser infrastructure until
+there is a concrete source that needs another tool.
 
-docker run --rm -p 8082:8080 ghcr.io/ggml-org/llama.cpp:server \
-  -hf ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF \
-  --alias Qwen3-Reranker-0.6B-Q8_0.gguf \
-  --embedding --pooling rank --host 0.0.0.0 --port 8080 \
-  --ctx-size 8192 --batch-size 8192 --ubatch-size 8192 --parallel 1
-```
+**Reasons:** a local app has limited resources, overlapping models may not improve
+results, and adapters should not produce incompatible downstream behavior.
 
-The adapters use llama.cpp's documented [`/v1/embeddings` and `/v1/rerank`
-endpoints](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
-Both HTTP adapters use `httpx.AsyncClient`. Embedders expose one generic async
-`embed(texts)` method and receive already prepared text. `ScoringService` applies
-Qwen's `Instruct: ...\nQuery: ...` format for job searches; `VacancyService` combines
-vacancy titles and content without a query instruction. Embeddings use all 1024
-components without truncation. The shared `EMBEDDING_DIMENSIONS` constant lives
-in `src/ports/embedder.py` and also defines the database vector column widths.
-Reranking restores input order from response indexes and preserves
-Qwen's scores in the 0–1 range. Invalid response indexes, dimensions, vectors,
-and scores fail before persistence; HTTP failures propagate to callers.
+## D011 — Reviewable editing and multilingual style refinement
 
-To select the previous implementations independently, set `EMBEDDING_BACKEND=local`
-with `EMBEDDING_MODEL_PATH` pointing to its GGUF, and/or `RERANKER_BACKEND=local`
-with `RERANKER_MODEL_NAME=BAAI/bge-reranker-v2-m3`. Local inference runs in a worker
-thread with its existing model lock; prompt preparation belongs to services.
-The local embedding model must also produce 1024 components.
-Existing databases with 768-component vector columns need a schema migration to
-`vector(1024)` for both title and content in `vacancies` and `preference_intents`;
-changing the Python models does not alter existing tables.
-Switching embedding dimensions, models, or prompt formats
-requires regenerating **all** vacancy and preference embeddings before matching;
-equal dimensions do not make vectors from different models comparable.
+**Status: Proposed; the requested fabrication mode remains an open product decision.**
 
-Run the HTTP adapter checks without running Docker or downloading models:
+Suggested trustworthy editing modes:
 
-```sh
-LITELLM_LOCAL_MODEL_COST_MAP=True .venv/bin/python -m unittest discover -s tests -p test_llama_server.py
-```
+1. Polish: wording, ordering, clarity, and compression; no new factual claims.
+2. Evidence-backed enrichment: include relevant facts from the confirmed profile
+   that were absent from the current master/tailored resume.
+3. Aggressive presentation: larger structural changes and stronger positioning,
+   still grounded in facts, with questions to collect missing evidence.
 
-## Vacancy processing workers
+The user also requested considering a mode that can invent/change facts. This is
+not equivalent to enriching from profile evidence: it creates false claims, may
+harm applications, and invalidates suitability comparisons. If an experimental
+fictional draft is supported, isolate and label its claims; never promote them
+into confirmed profile/master facts, silently merge them into truthful drafts,
+or present score gains as qualification gains. Export behavior remains open.
 
-Run PostgreSQL with pgvector and RabbitMQ, configure the existing `DB_` settings
-and `TASKIQ_RABBITMQ_URL`, and apply the additive schema upgrade before deploying
-the new API or workers. The upgrade creates missing tables and adds pipeline
-columns to existing vacancies; existing vacancy data is retained.
+Every mode should produce an editable diff with factual additions highlighted,
+source references where available, and explicit user approval before replacing a
+master resume or exporting a final application document.
 
-```sh
-.venv/bin/python -m src.infrastructure.db.vacancy_pipeline
-.venv/bin/uvicorn src.main:app
-.venv/bin/taskiq worker src.tasks.scraping:io_broker --ack-type when_executed --workers 2 --max-async-tasks 5
-.venv/bin/taskiq worker src.tasks.scraping:laya_broker --ack-type when_executed --workers 1 --max-async-tasks 1
-.venv/bin/taskiq scheduler src.tasks.scraping:scheduler
-```
+Do not equate generic words with proof of AI authorship. Make style review
+language-aware and optional: deterministic rules for clear repetition/formatting,
+with an optional constrained LLM rewrite for fluency. Protect names, dates,
+metrics, credentials, and technical terms; review any changed claims. No style
+pass should promise that a document is "AI-undetectable".
 
-All Laya evaluations run on the `laya` queue. Collection, keyword filtering,
-detailed scraping, normalization, embedding scoring, reranking, final persistence,
-and reconciliation run on `io`. Each worker opens the other broker for publishing
-the next stage. Each queue has its own durable TTL retry queue, so delayed retries
-return to the correct worker without a RabbitMQ plugin.
-[Taskiq acknowledgement documentation](https://taskiq-python.github.io/guide/cli.html)
-describes `when_executed`, which is configured on every task and in these commands.
+**Reasons:** aggressive blacklist deletion damages natural language, separate
+lists for every language are brittle, and an LLM rewrite can introduce new facts.
 
-Start collection with `POST /api/v1/vacancies/previews/collect`:
+## D012 — Version exports and application history
 
-```json
-{
-  "profile_id": "PROFILE_UUID",
-  "sources": ["linkedin", "hh"],
-  "preferences": ["Backend"],
-  "query": {"text": "Python backend", "location": "Germany"},
-  "hard_filters": {"work_formats": ["remote"]}
-}
-```
+**Status: Proposed.**
 
-Either names list can be `["all"]`. The API resolves enabled preference IDs and
-source IDs before enqueueing collection IDs. Existing `companies` rows represent
-sources: `name` is the selectable source name, `careers_url` is its listing page,
-and `search_settings.source` names its adapter (`linkedin` or `hh`).
-Built-in source rows are created when first selected. An optional
-`vacancy_page_urls` mapping overrides stored URLs for the selected sources.
+Offer a small set of ATS-readable templates first, including a Cyrillic-capable
+A4 layout. Embed fonts, test text extraction and reading order, and support both
+Russian and English content. Locale affects labels, dates, and typography; photos
+and additional personal details should be optional, not universal requirements.
+Validate output with representative long resumes, not screenshots alone.
 
-Listing pages are scraped in batches and previews are committed immediately
-after duplicate checking, before any evaluation task is published. Exact
-`(source, external_id)` matches are skipped. Normalized company/title matches
-against previews or vacancies discovered in the previous seven days are treated
-as recent reposts. Initial inserts use uniqueness constraints and conflict-safe
-inserts; advisory transaction locks also serialize competing repost checks.
-Later stages update the same row.
+An application tracker can start with saved -> preparing -> applied -> interview
+-> offer/rejected/withdrawn, plus notes, links, dates, and reminders. An application
+links to an immutable submitted resume/cover-letter version and vacancy snapshot.
+The current vacancy and current master resume may change independently. Allow
+multiple application attempts without overwriting history. Defer automatic
+submission until review, external actions, and failure handling are specified.
 
-Descriptions of at least `SCRAPING_PREVIEW_DESCRIPTION_MIN_LENGTH` characters
-(default 80) are eligible for early Laya evaluation. This is a configurable
-sufficiency heuristic. Smaller previews use keyword relevance against the selected
-preferences. Known hard constraints and required/excluded keywords apply to both
-paths; unknown preview fields remain eligible. Preview evaluation is persisted
-and only gates collection readiness.
+**Reasons:** users need to know what they actually sent, and a ranking list alone
+does not manage a job search. A basic tracker is often more useful than adding
+another scoring model.
 
-Read previews with `GET /api/v1/vacancies/previews/PROFILE_UUID`, then start details
-with `POST /api/v1/vacancies/process`:
+## Cross-cutting risks to address before expanding scope
 
-```json
-{
-  "profile_id": "PROFILE_UUID",
-  "preview_ids": ["PREVIEW_UUID"],
-  "hard_filters": {"work_formats": ["remote"]},
-  "role_fit": ["good", "strong"],
-  "skill_fit": ["weak", "good", "strong"]
-}
-```
+- Resumes and personal stories are sensitive. Explain which text is sent to which
+  remote provider, redact logs, protect keys, and allow data deletion/backups.
+- Localhost access is not a complete security boundary: restrict administrative
+  actions and network destinations. Treat fetched HTML and pasted vacancy text as
+  untrusted data, including prompt injection, unsafe links, and frontend markup.
+- Job sources change, throttle requests, and may restrict automated access.
+  Respect source policies and access controls; make partial failures observable.
+- Audit reused Resume-Matcher code/assets and their actual license/attribution
+  obligations before redistributing; do not assume copying grants unrestricted use.
+- Current startup/schema/DI failures must be repaired before layering on features.
 
-Omit `preview_ids` to select ready previews by filters. Laya label filters apply
-when a preview has an evaluation. The API creates the initial vacancy rows and a
-persistent scoring batch atomically, then publishes vacancy IDs for detailed
-scraping. That batch keeps the embedding shortlist consistent across parsing
-chunks. The tasks publish their successors directly.
+## Preference implementation sequence if these proposals are accepted
 
-Every processing task reloads and locks its existing entities and checks the
-expected status. Completed stages exit without repeating work. Results and next
-statuses commit in the same transaction before publishing the successor.
-Row locks are held through bounded stage I/O to prevent concurrent execution;
-size database pools and worker concurrency accordingly. Worker death rolls back
-the stage transaction and releases its locks.
+1. Repair current preference model/import/relationship inconsistencies first.
+   The model uses `general_title`, while several consumers/constraints still
+   expect `name` or `PreferenceIntent`; the current representation is not usable.
+2. Define strict draft/confirmed preference schemas and constraint policies.
+3. Add the small role catalog, resolver, and company-group definitions.
+4. Implement extraction -> clarification -> confirmation -> persistence.
+5. Replace generic title-token filtering with shared role/qualifier matching.
+6. Preserve per-preference matches, evidence, and unknown conditions.
+7. Add fixture-based evaluation before introducing semantic fallbacks: AI vs ML,
+   Go vs Golang, broad Software Engineer titles, multilingual aliases, seniority,
+   missing salary, compensation basis, employer aliases, and OR/AND behavior.
 
-The scheduled reconciliation task is the only global unfinished-work scan.
-It selects stale non-terminal rows with `FOR UPDATE SKIP LOCKED`, refreshes their
-scheduling timestamp atomically, commits, then republishes the appropriate stage.
-A commit/publish gap, exhausted stage retries, or a failed recovery publication
-is retried after `TASKIQ_STALE_TIMEOUT_SECONDS` (default 900). Concurrent recovery
-runs and currently executing stages cannot claim the same locked row. Run one
-scheduler; `TASKIQ_RECOVERY_CRON` defaults to once per minute.
+Measure preview recall and detail-fetch cost on labeled examples; do not choose
+semantic thresholds from intuition or treat LLM confidence as calibrated accuracy.
 
-Taskiq owns stage retries: `TASKIQ_STAGE_ATTEMPTS=3`, with backoff and jitter
-starting at `TASKIQ_RETRY_DELAY_SECONDS=5`.
-HTTP/model clients perform one or two attempts, and normalization has no extra
-business retry loop. RabbitMQ redelivery handles unacknowledged messages after
-worker or connection loss.
+## Open product decisions
 
-Install Chromium with `.venv/bin/playwright install --with-deps chromium`.
-HeadHunter uses its official API; LinkedIn uses public job pages and does not
-authenticate or bypass challenges. `CRAWLEE_` settings control concurrency
-(1/3/5), request rate (30/minute), retries (1), and navigation/handler timeouts
-(30/300 seconds). `SCRAPING_` settings control listing pages (10), previews (250),
-details (50), normalization batch size (5), and Laya batch size (32).
-Crawlee temporary storage remains isolated per invocation.
-
-## Checks
-
-Run the standard-library suite without contacting LLM providers:
-
-```sh
-LITELLM_LOCAL_MODEL_COST_MAP=True .venv/bin/python -m unittest discover -s tests
-```
-
-The configuration and health routers are exercised in an isolated FastAPI app.
-Vacancy checks cover task replay, batch completion, shortlist ordering, fresh
-detailed evaluation, preview persistence before publication, repost detection,
-and stale recovery. They use fake clients and database sessions; a live
-PostgreSQL/RabbitMQ deployment is needed to verify transport and database locking.
+- Initial supported languages, role coverage, and job sources.
+- Whether users want separate AI/ML preferences or one preference with both roles.
+- Whether related-role expansion is opt-in (recommended) or a default.
+- Default handling of unknown facts in the final results view.
+- Compensation defaults and whether company groups can be user-defined.
