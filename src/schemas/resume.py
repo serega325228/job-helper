@@ -1,8 +1,8 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, JsonValue
 
-from src.infrastructure.models.resume import ResumeLanguage
+Strategy = Literal["keywords", "full", "cheat"]
 
 
 class PersonalInfo(BaseModel):
@@ -27,7 +27,10 @@ class WorkExperience(BaseModel):
     location: str | None = None
     years: str | None = None
     description: list[str] = Field(default_factory=list)
-    descriptionStyles: list[str] | None = None
+    descriptionStyles: list[str] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("descriptionStyles", "description_styles"),
+    )
 
 
 class Education(BaseModel):
@@ -48,15 +51,24 @@ class PersonalProject(BaseModel):
     role: str | None = None
     years: str | None = None
     description: list[str] = Field(default_factory=list)
-    descriptionStyles: list[str] | None = None
+    descriptionStyles: list[str] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("descriptionStyles", "description_styles"),
+    )
 
 
 class AdditionalInfo(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    technicalSkills: list[str] = Field(default_factory=list)
+    technicalSkills: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("technicalSkills", "technical_skills"),
+    )
     languages: list[str] = Field(default_factory=list)
-    certificationsTraining: list[str] = Field(default_factory=list)
+    certificationsTraining: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("certificationsTraining", "certifications_training"),
+    )
     awards: list[str] = Field(default_factory=list)
 
 
@@ -65,15 +77,29 @@ class AdditionalInfo(BaseModel):
 class ResumeData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    #content_language: ResumeLanguage = Field(default=ResumeLanguage.EN)
-    personal_info: PersonalInfo
-    summary: str | None = None # Maybe delete this too
-    work_experience: list[WorkExperience] = Field(default_factory=list)
+    # Accept old stored keys, but expose and serialize only the canonical camelCase fields.
+    personalInfo: PersonalInfo = Field(
+        validation_alias=AliasChoices("personalInfo", "personal_info")
+    )
+    summary: str | None = None
+    workExperience: list[WorkExperience] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("workExperience", "work_experience"),
+    )
     education: list[Education] = Field(default_factory=list)
-    personal_projects: list[PersonalProject] = Field(default_factory=list)
+    personalProjects: list[PersonalProject] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("personalProjects", "personal_projects"),
+    )
     additional: AdditionalInfo = Field(default_factory=AdditionalInfo)
-    custom_sections: dict[str, JsonValue] = Field(default_factory=dict)
-    section_meta: dict[str, JsonValue] = Field(default_factory=dict) # Maybe delete
+    customSections: dict[str, JsonValue] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("customSections", "custom_sections"),
+    )
+    sectionMeta: dict[str, JsonValue] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("sectionMeta", "section_meta"),
+    )
 
 
 class JobKeywords(BaseModel):
@@ -102,6 +128,12 @@ class ResumeChange(BaseModel):
 class ImproveDiffResult(BaseModel):
     changes: list[ResumeChange]
     strategy_notes: str = ""
+
+
+class ProtectedClaimsReview(BaseModel):
+    rejected_indices: list[int] = Field(
+        description="Zero-based indices of edits inventing or changing protected personal facts."
+    )
 
 
 class RejectedChange(BaseModel):

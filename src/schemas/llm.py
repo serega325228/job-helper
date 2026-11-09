@@ -86,7 +86,6 @@ class FeatureConfig(BaseModel):
     enable_cover_letter: StrictBool
     enable_outreach_message: StrictBool
     enable_interview_prep: StrictBool
-    allow_unverified_skills: StrictBool
 
 
 class LLMHealth(BaseModel):

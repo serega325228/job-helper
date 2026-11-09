@@ -128,6 +128,8 @@ class LLMConfigManager:
     ) -> tuple[LLMConfig | None, FeatureConfig | None]:
         if not isinstance(stored, dict):
             raise ConfigError("invalid_config_file", status_code=503)
+        if stored.get("default_prompt_id") == "nudge":
+            stored["default_prompt_id"] = "keywords"
         keys = self._keys(stored)
         try:
             raw_config = stored.get("llm")
@@ -139,6 +141,9 @@ class LLMConfigManager:
                     api_key=keys.get(request.provider),
                 )
             raw_features = stored.get("features")
+            if isinstance(raw_features, dict):
+                # Retire the old flag without silently opting anyone into cheat mode.
+                raw_features.pop("allow_unverified_skills", None)
             features = (
                 FeatureConfig.model_validate(raw_features)
                 if raw_features is not None

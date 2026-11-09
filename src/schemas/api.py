@@ -3,6 +3,7 @@ from typing import Any
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, SecretStr
 
 from src.schemas.llm import FeatureConfig, LLMConfigRequest
+from src.schemas.resume import Strategy
 
 # Config Models
 
@@ -35,7 +36,7 @@ class LanguageConfigResponse(BaseModel):
 class PromptOption(BaseModel):
     """Prompt option for resume tailoring."""
 
-    id: str
+    id: Strategy
     label: str
     description: str
 
@@ -43,13 +44,13 @@ class PromptOption(BaseModel):
 class PromptConfigRequest(BaseModel):
     """Request to update prompt settings."""
 
-    default_prompt_id: str | None = None
+    default_prompt_id: Strategy | None = None
 
 
 class PromptConfigResponse(BaseModel):
     """Response for prompt settings."""
 
-    default_prompt_id: str
+    default_prompt_id: Strategy
     prompt_options: list[PromptOption]
 
 

@@ -380,6 +380,29 @@ submission until review, external actions, and failure handling are specified.
 does not manage a job search. A basic tracker is often more useful than adding
 another scoring model.
 
+## D013 — Import Resume-Matcher frontend and kanban source without integration
+
+**Status: Accepted. Source copied; runtime integration deferred.**
+
+- The upstream frontend is copied into `frontend/`, including the existing
+  `/tracker` kanban page, components, API client, translations, assets, and tests.
+- The original backend application source is preserved separately in
+  `vendor/resume_matcher/backend/`. The tracker depends on its shared database,
+  schemas, LLM extraction, and automatic card-creation hooks in resume tailoring;
+  those support modules are retained unchanged rather than partially rewritten.
+- The copied tracker retains its seven upstream columns: saved, applied,
+  no_response, response, interview, accepted, rejected. This does not establish
+  the eventual job-helper application model or integration contract.
+- Neither the copied frontend nor the tracker backend is adapted to job-helper's
+  existing API, PostgreSQL models, profiles, or Dishka container. No active
+  backend routes, dependencies, or startup behavior are changed.
+- Dependencies, build artifacts, caches, private environment files, and user
+  databases are excluded. Apache-2.0 licenses and `UPSTREAM.txt` provenance notes
+  accompany the source. Tests/builds/installs/diagnostics are deliberately not run.
+
+**Reason:** preserve the reusable UI and complete tracker behavior for later
+integration without expanding this import into a backend repair or redesign.
+
 ## Cross-cutting risks to address before expanding scope
 
 - Resumes and personal stories are sensitive. Explain which text is sent to which

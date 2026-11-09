@@ -31,6 +31,7 @@ from src.routers.config import (
     router as config_router,
 )
 from src.routers.health import router as health_router
+from src.schemas.api import PromptConfigRequest
 from src.schemas.llm import FeatureConfig, LLMConfigRequest
 from src.services.sercurity import SecurityService
 
@@ -61,7 +62,6 @@ def feature_config() -> FeatureConfig:
         enable_cover_letter=True,
         enable_outreach_message=False,
         enable_interview_prep=True,
-        allow_unverified_skills=False,
     )
 
 
@@ -157,6 +157,27 @@ class RuntimeConfigTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(restored.get_features(), feature_config())
             self.assertEqual(restored.get().model, "local-model")
             self.assertIn("openai", restored.get_api_keys())
+
+    async def test_retired_skill_flag_and_mode_migrate_without_enabling_cheat(self):
+        for previous in (False, True):
+            with TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                path.write_text(json.dumps({
+                    "features": feature_config().model_dump() | {"allow_unverified_skills": previous},
+                    "default_prompt_id": "nudge",
+                }))
+                manager = LLMConfigManager(settings_at(directory), SecurityService(Path(directory)))
+                self.assertEqual(manager.get_features(), feature_config())
+                self.assertEqual(manager.get_value("default_prompt_id"), "keywords")
+                await manager.update_values({"ui_language": "en"})
+                self.assertNotIn("allow_unverified_skills", json.loads(path.read_text())["features"])
+        for mode in ("keywords", "full", "cheat"):
+            self.assertEqual(PromptConfigRequest.model_validate({"default_prompt_id": mode}).default_prompt_id, mode)
+        for mode in ("nudge", "unknown"):
+            with self.assertRaises(ValidationError):
+                PromptConfigRequest.model_validate({"default_prompt_id": mode})
+        with self.assertRaises(ValidationError):
+            FeatureConfig.model_validate(feature_config().model_dump() | {"allow_unverified_skills": True})
 
     async def test_key_deletion_changes_new_requests_only(self):
         with TemporaryDirectory() as directory:

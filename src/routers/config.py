@@ -159,11 +159,12 @@ async def update_language_config(
 
 
 def _prompt_response(config_manager: LLMConfigManager) -> PromptConfigResponse:
+    default = config_manager.get_value("default_prompt_id", DEFAULT_IMPROVE_PROMPT_ID)
+    if default not in {option["id"] for option in IMPROVE_PROMPT_OPTIONS}:
+        default = DEFAULT_IMPROVE_PROMPT_ID
     return PromptConfigResponse(
-        default_prompt_id=config_manager.get_value(
-            "default_prompt_id", DEFAULT_IMPROVE_PROMPT_ID
-        ),
-        prompt_options=[PromptOption(**option) for option in IMPROVE_PROMPT_OPTIONS],
+        default_prompt_id=default,
+        prompt_options=[PromptOption.model_validate(option) for option in IMPROVE_PROMPT_OPTIONS],
     )
 
 

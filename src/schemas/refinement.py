@@ -11,11 +11,11 @@ class KeywordGapAnalysis(BaseModel):
     missing_keywords: list[str] = Field(default_factory=list)
     injectable_keywords: list[str] = Field(
         default_factory=list,
-        description="Missing keywords that exist in master resume (safe to add)",
+        description="Missing keywords eligible under the selected tailoring mode",
     )
     non_injectable_keywords: list[str] = Field(
         default_factory=list,
-        description="Missing keywords not in master resume (cannot add truthfully)",
+        description="Missing keywords not eligible under the selected tailoring mode",
     )
     current_match_percentage: float = Field(
         default=0.0, ge=0.0, le=100.0, description="Current keyword match percentage"
@@ -63,9 +63,6 @@ class RefinementStats(BaseModel):
     keywords_injected: int = Field(
         default=0, ge=0, description="Number of keywords injected"
     )
-    ai_phrases_removed: list[str] = Field(
-        default_factory=list, description="List of AI phrases that were removed"
-    )
     alignment_violations_fixed: int = Field(
         default=0, ge=0, description="Number of alignment violations corrected"
     )
@@ -87,7 +84,6 @@ class RefinementResult(BaseModel):
     passes_completed: int = Field(default=0, ge=0)
     keyword_analysis: KeywordGapAnalysis | None = None
     alignment_report: AlignmentReport | None = None
-    ai_phrases_removed: list[str] = Field(default_factory=list)
     keywords_injected: list[str] = Field(default_factory=list)
     unverified_skills: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
@@ -98,7 +94,6 @@ class RefinementResult(BaseModel):
         return RefinementStats(
             passes_completed=self.passes_completed,
             keywords_injected=len(self.keywords_injected),
-            ai_phrases_removed=self.ai_phrases_removed,
             alignment_violations_fixed=(
                 len(
                     [

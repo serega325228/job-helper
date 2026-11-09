@@ -2,6 +2,8 @@ import json
 from uuid import UUID
 
 from src.agents.profile.schemas import ProfileOutput
+from src.agents.resume.schemas import ResumeOutput
+from src.agents.schemas import NextQuestion
 from src.exceptions.profile import AnalysisError, ProfileNotFoundError
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.llm.llm import LLMProvider
@@ -10,6 +12,7 @@ from src.infrastructure.models.profile import AnalysisStatus, Profile
 from src.prompts.profile import PROFILE_ANALYSIS_PROMPT
 from src.prompts.resume_wizard import RESUME_WIZARD_ANALYZE_PROFILE_PROMPT
 from src.repositories.prompt import PromptRepository
+from src.schemas.preference import PreferenceData
 from src.schemas.profile import ProfileData
 from src.schemas.resume import ResumeData
 
@@ -25,32 +28,42 @@ class ProfileService:
         self._prompts = prompt_repo
         self._llm = llm
 
-    async def create(
-        self,
-        name: str,
-        raw_story: str,
-    ) -> Profile:
-        profile = Profile(name=name, raw_story=raw_story)
-
+    async def create(self, name: str, raw_story: str) -> Profile:
+        profile = Profile(name=name, raw_data=raw_story)
         async with self._uow as uow:
             await uow.profiles.create(profile)
-
         return profile
 
-    async def get_profile(
-        self,
-        profile_id: UUID,
-    ) -> Profile | None:
+    async def get_profile(self, profile_id: UUID) -> Profile | None:
         async with self._uow as uow:
-            profile = await uow.profiles.get_by_id(profile_id)
+            return await uow.profiles.get_by_id(profile_id)
 
-        return profile
+    async def get_profile_data(self, profile_id: UUID) -> ProfileData:
+        profile = await self.get_profile(profile_id)
+        if profile is None:
+            raise ProfileNotFoundError(profile_id)
+
+        stored = profile.processed_data or {}
+        # New saves retain the whole validated profile, including custom sections,
+        # in the existing JSON column. Older rows may contain only extracted facts.
+        if {"name", "raw_data", "processed_data", "profile_summary"} <= stored.keys():
+            data = ProfileData.model_validate(stored)
+            return data.model_copy(update={"raw_data": profile.raw_data})
+        return ProfileData(
+            name=profile.name or "",
+            raw_data=profile.raw_data,
+            processed_data=stored,
+            profile_summary=profile.profile_summary or "",
+            skills=profile.skills or [],
+            experience=profile.experience or [],
+            education=profile.education or [],
+            seniority=profile.seniority,
+            experience_years=profile.experience_years,
+            contacts=profile.contacts or {},
+        )
 
     async def get_preferences_by_profile_id(
-        self,
-        profile_id: UUID,
-        *,
-        enabled_only: bool = False,
+        self, profile_id: UUID, *, enabled_only: bool = False
     ) -> list[Preference]:
         async with self._uow as uow:
             return await uow.profiles.get_preferences_by_profile_id(
@@ -58,107 +71,120 @@ class ProfileService:
             )
 
     async def get_preferences_by_ids(
-        self,
-        profile_id: UUID,
-        preference_ids: list[UUID],
+        self, profile_id: UUID, preference_ids: list[UUID]
     ) -> list[Preference]:
         async with self._uow as uow:
             return await uow.profiles.get_preferences_by_ids(profile_id, preference_ids)
 
-    # Fix this too
     async def analyze_data(
         self,
         profile_id: UUID,
         language: str,
         data: ProfileData,
         last_answer: str,
+        *,
+        last_question: NextQuestion | None = None,
+        raw_answers: list[dict] | None = None,
     ) -> ProfileOutput:
         try:
             async with self._uow as uow:
                 profile = await uow.profiles.get_by_id(profile_id)
                 if profile is None:
                     raise ProfileNotFoundError(profile_id)
-
                 raw_data = profile.raw_data
                 profile.analysis_status = AnalysisStatus.PROCESSING
 
-            prompt = self._prompts.get(
-                "custom_key",
-                PROFILE_ANALYSIS_PROMPT,
+            template, _ = self._prompts.get(
+                "profile_analysis_prompt", PROFILE_ANALYSIS_PROMPT
             )
-            prompt = prompt[0].format(
-                output_language=language,
-                raw_data=raw_data,
-                profile_json=data.model_dump_json(),
-                answer_text=last_answer,
-            )
-            return await self._llm.complete(  # Think about changing simple prompt to a system prompt everywhere
-                prompt,
+            out = await self._llm.complete(
+                json.dumps(
+                    {
+                        "raw_data": raw_data,
+                        "profile_data": data.model_dump(mode="json"),
+                        "last_question": last_question.model_dump() if last_question else None,
+                        "answer_text": last_answer,
+                        "answer_history": raw_answers or [],
+                    },
+                    ensure_ascii=False,
+                ),
+                system_prompt=template.format(output_language=language),
                 schema=ProfileOutput,
             )
+            # Source preservation is an application invariant, not just a prompt rule.
+            out.profile_data = out.profile_data.model_copy(update={"raw_data": raw_data})
+            return out
         except Exception:
             await self._set_analysis_status(profile_id, AnalysisStatus.FAILED)
             raise
 
-    # Add updating/saving profile
-    async def update_profile(self, profile: Profile) -> Profile:
+    async def update_profile(
+        self,
+        profile_id: UUID,
+        data: ProfileData,
+        preferences: list[PreferenceData] | None = None,
+    ) -> Profile:
         async with self._uow as uow:
-            profile = await uow.profiles.get_by_id(profile_id)
+            profile = await uow.profiles.get_by_id(profile_id, lock=True)
             if profile is None:
                 raise ProfileNotFoundError(profile_id)
-
+            data = data.model_copy(update={"raw_data": profile.raw_data})
+            profile.name = data.name
             profile.apply_analysis(
-                profile_summary=result.summary,
-                skills=result.skills,
-                experience=result.experience,
-                education=result.education,
-                seniority=result.seniority,
-                experience_years=result.experience_years,
+                profile_summary=data.profile_summary,
+                skills=data.skills,
+                experience=data.experience,
+                education=data.education,
+                seniority=data.seniority,
+                experience_years=data.experience_years,
             )
-            if not profile.preferences:
+            profile.contacts = data.contacts
+            profile.processed_data = data.model_dump(mode="json")
+            # Do not replace existing search preferences as a side effect of analysis.
+            if preferences and not profile.preferences:
                 profile.preferences.extend(
-                    Preference(
-                        profile_id=profile.id,
-                        **intent.model_dump(mode="json"),
-                    )
-                    for intent in result.preferences
+                    Preference(profile_id=profile.id, **item.model_dump())
+                    for item in preferences
                 )
             profile.analysis_status = AnalysisStatus.COMPLETED
-
         return profile
 
     async def analyze_profile_and_prepare_resume_question(
         self,
         profile_id: UUID,
         language: str,
-        current_section: str,
+        last_question: NextQuestion | None,
         last_answer: str,
         resume_data: ResumeData,
-        profile_data: ProfileData,
-    ) -> ProfileOutput:
+        *,
+        raw_answers: list[dict] | None = None,
+    ) -> ResumeOutput:
         try:
-            prompt = self._prompts.get(
-                "custom_key", RESUME_WIZARD_ANALYZE_PROFILE_PROMPT
-            )  # Get the fucking rid of prompt repo
-            prompt = prompt[0].format(
-                output_language=language,
-                current_section=current_section,
-                resume_json=resume_data.model_dump_json(),
-                profile_json=profile_data.model_dump_json(),
-                # Think about validating this info with ProfileData schema,
-                # but maybe unnecessary because it's already validated
-                answer_text=last_answer,
+            profile_data = await self.get_profile_data(profile_id)
+            template, _ = self._prompts.get(
+                "resume_wizard_profile_prompt", RESUME_WIZARD_ANALYZE_PROFILE_PROMPT
             )
-
-            return await self._llm.complete(prompt, schema=ProfileOutput)
-
-        except Exception as e:
-            raise AnalysisError(e)
+            return await self._llm.complete(
+                json.dumps(
+                    {
+                        "profile_data": profile_data.model_dump(mode="json"),
+                        "resume_data": resume_data.model_dump(mode="json"),
+                        "last_question": last_question.model_dump() if last_question else None,
+                        "answer_text": last_answer,
+                        "answer_history": raw_answers or [],
+                    },
+                    ensure_ascii=False,
+                ),
+                system_prompt=template.format(output_language=language),
+                schema=ResumeOutput,
+            )
+        except ProfileNotFoundError:
+            raise
+        except Exception as error:
+            raise AnalysisError(error) from error
 
     async def _set_analysis_status(
-        self,
-        profile_id: UUID,
-        status: AnalysisStatus,
+        self, profile_id: UUID, status: AnalysisStatus
     ) -> None:
         async with self._uow as uow:
             profile = await uow.profiles.get_by_id(profile_id)

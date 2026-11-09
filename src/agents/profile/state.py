@@ -1,32 +1,36 @@
 from dataclasses import dataclass
 from operator import add
+from typing import Annotated
 from uuid import UUID
 
-from langgraph.graph.message import Annotated, add_messages
-from pydantic import Field
-from pydantic.main import BaseModel
+from langchain_core.messages import AnyMessage
+from langgraph.graph.message import add_messages
+from pydantic import BaseModel, Field
 
+from src.agents.schemas import NextQuestion
+from src.schemas.preference import PreferenceData
 from src.schemas.profile import ProfileData
 from src.services.profile import ProfileService
-from src.services.resume import ResumeService
 
 
 class ProfileState(BaseModel):
-    messages: Annotated[list[str], add_messages] = Field(default_factory=list)
-    profile_exists: bool = Field(default=False)
+    messages: Annotated[list[AnyMessage], add_messages] = Field(default_factory=list)
     raw_answers: Annotated[list[dict], add] = Field(default_factory=list)
     language: str
-    profile_id: UUID = Field()
-    profile: ProfileData  # Maybe add default
-    preferences: list[str] = Field(default_factory=list)
+    profile_id: UUID
+    profile: ProfileData = Field(
+        default_factory=lambda: ProfileData(
+            name="", raw_data="", processed_data={}, profile_summary=""
+        )
+    )
+    preferences: list[PreferenceData] = Field(default_factory=list)
+    # Initial [] is not used for routing until the analysis node has run.
     missing_fields: list[str] = Field(default_factory=list)
-    current_section: str
-    next_question: str
-    is_complete: bool
-    last_answer: str
+    next_question: NextQuestion | None = None
+    last_answer: str = ""
+    approved: bool = False
 
 
 @dataclass(slots=True)
 class ProfileContext:
-    resume_service: ResumeService
     profile_service: ProfileService

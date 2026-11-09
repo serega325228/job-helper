@@ -170,7 +170,6 @@ class RefinerSettings(BaseSettings):
     )
 
     enable_keyword_injection: bool = Field(default=True)
-    enable_ai_phrase_removal: bool = Field(default=True)
     enable_master_alignment_check: bool = Field(default=True)
 
 

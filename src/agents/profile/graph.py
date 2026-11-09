@@ -1,4 +1,4 @@
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
@@ -13,16 +13,9 @@ from src.agents.profile.state import ProfileContext, ProfileState
 
 
 def create_profile_agent(
-    # settings,
-    # models,
-    # tools,
-    checkpointer: AsyncPostgresSaver,
-) -> CompiledStateGraph:
-    graph = StateGraph(
-        ProfileState,
-        context_schema=ProfileContext,
-    )
-
+    checkpointer: BaseCheckpointSaver,
+) -> CompiledStateGraph[ProfileState, ProfileContext, ProfileState, ProfileState]:
+    graph = StateGraph(ProfileState, context_schema=ProfileContext)
     graph.add_node("start", start)
     graph.add_node("prepare_question", prepare_question)
     graph.add_node("ask_user", ask_user)
@@ -30,28 +23,17 @@ def create_profile_agent(
     graph.add_node("save_profile", save_profile)
 
     graph.add_edge(START, "start")
+    graph.add_edge("start", "prepare_question")
     graph.add_conditional_edges(
-        "start",
-        lambda state: (
-            "prepare_question" if state.profile_exists else "end"
-        ),
-        {
-            "prepare_question": "prepare_question",
-            "end": END,
-        },
+        "prepare_question",
+        lambda state: "ask_user" if state.missing_fields else "profile_review",
+        {"ask_user": "ask_user", "profile_review": "profile_review"},
     )
-    graph.add_edge("prepare_question", "ask_user")
+    graph.add_edge("ask_user", "prepare_question")
     graph.add_conditional_edges(
-        "ask_user",
-        lambda state: (
-            "keep_asking" if len(state.missing_fields) > 0 else "review_profile"
-        ),
-        {
-            "keep_asking": "prepare_question",
-            "review_profile": "profile_review",
-        },
+        "profile_review",
+        lambda state: "save_profile" if state.approved else "prepare_question",
+        {"save_profile": "save_profile", "prepare_question": "prepare_question"},
     )
-    graph.add_edge("profile_review", "save_profile")
     graph.add_edge("save_profile", END)
-
     return graph.compile(checkpointer=checkpointer)

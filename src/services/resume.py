@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import UUID
@@ -6,6 +7,7 @@ from uuid import UUID
 from fastapi.exceptions import HTTPException
 
 from src.agents.resume.schemas import ResumeOutput
+from src.agents.schemas import NextQuestion
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.document_parser.document_parser import DocumentParser
 from src.infrastructure.llm.llm import LLMProvider
@@ -74,7 +76,7 @@ class ResumeService:
         resume = self.master_resume_from_data(
             profile_id=profile_id,
             filename=filename,
-            title=parsed.personal_info.title or "",
+            title=parsed.personalInfo.title or "",
             language=parsed.content_language, # Should think about language
             raw_data=extracted,
             data=parsed,
@@ -95,18 +97,28 @@ class ResumeService:
     async def prepare_resume_question(
         self,
         language: str,
-        current_section: str,
+        last_question: NextQuestion | None,
         last_answer: str,
         data: ResumeData,
+        *,
+        raw_answers: list[dict] | None = None,
     ) -> ResumeOutput:
-        prompt = self._prompts.get("custom_key", RESUME_WIZARD_TURN_PROMPT) # Get the fucking rid of prompt repo
-        prompt = prompt[0].format(
-            output_language=language,
-            current_section=current_section,
-            resume_json=data.model_dump_json(),
-            answer_text=last_answer,
+        template, _ = self._prompts.get(
+            "resume_wizard_turn_prompt", RESUME_WIZARD_TURN_PROMPT
         )
-        return await self._llm.complete(prompt, schema=ResumeOutput)
+        return await self._llm.complete(
+            json.dumps(
+                {
+                    "resume_data": data.model_dump(mode="json"),
+                    "last_question": last_question.model_dump() if last_question else None,
+                    "answer_text": last_answer,
+                    "answer_history": raw_answers or [],
+                },
+                ensure_ascii=False,
+            ),
+            system_prompt=template.format(output_language=language),
+            schema=ResumeOutput,
+        )
 
     @staticmethod
     def master_resume_from_data(

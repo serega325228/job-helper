@@ -1,5 +1,6 @@
 import json
 import unittest
+from typing import cast
 from unittest.mock import AsyncMock, Mock
 
 from src.config.settings import RefinerSettings
@@ -8,7 +9,15 @@ from src.infrastructure.llm.llm import LLMProvider
 from src.repositories.prompt import PromptRepository
 from src.schemas.interview import InterviewPrepData
 from src.schemas.llm import FeatureConfig
-from src.schemas.resume import ImproveDiffResult, JobKeywords, ResumeChange, ResumeData
+from src.schemas.resume import (
+    ImproveDiffResult,
+    JobKeywords,
+    ProtectedClaimsReview,
+    ResumeChange,
+    ResumeData,
+    Strategy,
+)
+from src.prompts.templates import IMPROVE_PROMPT_OPTIONS
 from src.services.cover_letter import CoverLetterService
 from src.services.improver import ImproverService
 from src.services.interview_prep import InterviewPrepService
@@ -56,13 +65,12 @@ def resume() -> ResumeData:
     )
 
 
-def features(unverified=False, **overrides) -> FeatureConfig:
+def features(**overrides) -> FeatureConfig:
     return FeatureConfig.model_validate(
         {
             "enable_cover_letter": True,
             "enable_outreach_message": True,
             "enable_interview_prep": True,
-            "allow_unverified_skills": unverified,
         }
         | overrides
     )
@@ -115,7 +123,6 @@ class ResumeGenerationTest(unittest.IsolatedAsyncioTestCase):
             edits,
             "Python SQL Rust",
             keywords(),
-            features=features(),
             prompt_id="full",
         )
         self.assertEqual(len(result.applied_changes), 5)
@@ -160,75 +167,66 @@ class ResumeGenerationTest(unittest.IsolatedAsyncioTestCase):
             change("additional.technicalSkills", "add_skill", "py"),
         ]
         result = service.apply_diffs(
-            original, invalid, "Python SQL Rust", keywords(), features=features()
+            original, invalid, "Python SQL Rust", keywords()
         )
         self.assertEqual(result.resume, original)
         self.assertEqual(len(result.rejected_changes), len(invalid))
         self.assertEqual(result.applied_changes, [])
         self.assertFalse(any(item.status == "applied" for item in result.suggestions))
 
-    def test_unverified_mode_requires_explicit_job_skills_and_labels_suggestions(self):
-        original = resume()
+    def test_only_cheat_adds_unsupported_skills_and_labels_them(self):
         service = ImproverService(AsyncMock(spec=LLMProvider), SkillCanonicalizer())
-        extracted = JobKeywords(required_skills=["Rust", "InventedSkill"])
-        result = service.apply_diffs(
-            original,
-            [
-                change("additional.technicalSkills", "add_skill", "Rust"),
-                change("additional.technicalSkills", "add_skill", "InventedSkill"),
-            ],
-            "Rust developer",
-            extracted,
-            features=features(True),
-        )
-        self.assertEqual(result.unverified_skills, ["Rust"])
-        self.assertEqual(len(result.applied_changes), 1)
-        self.assertEqual(len(result.rejected_changes), 1)
-        self.assertTrue(result.suggestions[0].unverified)
-        self.assertIn("confirm", result.suggestions[0].suggestion)
+        for mode in ("keywords", "full", "cheat"):
+            result = service.apply_diffs(
+                resume(),
+                [
+                    change("additional.technicalSkills", "add_skill", "Rust"),
+                    change("additional.technicalSkills", "add_skill", "Kubernetes"),
+                ],
+                "Rust developer using Kubernetes",
+                keywords(),
+                prompt_id=mode,
+            )
+            self.assertEqual(len(result.applied_changes), 2 if mode == "cheat" else 0)
+            self.assertEqual(result.unverified_skills, ["Rust", "Kubernetes"] if mode == "cheat" else [])
+            if mode == "cheat":
+                self.assertTrue(all(item.unverified for item in result.suggestions if item.status == "applied"))
+                self.assertIn("confirm", result.suggestions[0].suggestion)
 
-    def test_unverified_mode_does_not_invent_demonstrated_experience(self):
+    def test_modes_control_invented_experience_metrics_and_bullets(self):
         service = ImproverService(AsyncMock(spec=LLMProvider), SkillCanonicalizer())
-        for mode in (False, True):
+        for mode, expected in (("keywords", 0), ("full", 1), ("cheat", 3)):
             original = resume()
             result = service.apply_diffs(
                 original,
                 [
-                    change(
-                        "summary",
-                        "replace",
-                        "Experienced Rust developer",
-                        original.summary,
-                    )
+                    change("summary", "replace", "Experienced Rust developer", original.summary),
+                    change("workExperience[0].description", "append", "Built maintainable reports."),
+                    change("workExperience[0].description[0]", "replace", "Reduced reporting latency 40%.", original.workExperience[0].description[0]),
                 ],
-                "Rust developer",
+                "Rust SQL developer",
                 keywords(),
-                features=features(mode),
+                prompt_id=cast(Strategy, mode),
             )
-            self.assertEqual(result.resume, original)
-            self.assertEqual(len(result.rejected_changes), 1)
+            self.assertEqual(len(result.applied_changes), expected)
+            self.assertEqual(result.resume.personalInfo, original.personalInfo)
+            self.assertEqual(result.resume.education, original.education)
+            self.assertEqual(result.resume.workExperience[0].company, "Robust Inc")
+            if mode == "cheat":
+                self.assertTrue(any("invented" in warning for warning in result.warnings))
 
     def test_strategies_and_term_boundaries(self):
         service = ImproverService(AsyncMock(spec=LLMProvider), SkillCanonicalizer())
         self.assertFalse(service.has_evidence("Go", resume()))
         self.assertFalse(service.keyword_in_text("Go", "ongoing development"))
         self.assertTrue(service.keyword_in_text("C++", "We use C++ and Python."))
-        for strategy, edit in [
-            ("nudge", change("additional.technicalSkills", "add_skill", "SQL")),
-            (
-                "keywords",
-                change("workExperience[0].description", "append", "More reports."),
-            ),
-        ]:
-            result = service.apply_diffs(
-                resume(),
-                [edit],
-                "SQL",
-                keywords(),
-                features=features(),
-                prompt_id=strategy,
-            )
-            self.assertEqual(len(result.rejected_changes), 1)
+        self.assertEqual([option["id"] for option in IMPROVE_PROMPT_OPTIONS], ["keywords", "full", "cheat"])
+        result = service.apply_diffs(
+            resume(),
+            [change("workExperience[0].description", "append", "More reports.")],
+            "SQL", keywords(), prompt_id="keywords",
+        )
+        self.assertEqual(len(result.rejected_changes), 1)
 
     async def test_improver_requests_typed_diffs_and_preserves_suggestions(self):
         original = resume()
@@ -243,7 +241,6 @@ class ResumeGenerationTest(unittest.IsolatedAsyncioTestCase):
             original,
             "Python SQL Rust",
             keywords(),
-            features=features(),
         )
         self.assertIs(llm.complete.await_args.kwargs["schema"], ImproveDiffResult)
         self.assertEqual(result.applied_changes[0].value, "SQL")
@@ -261,13 +258,12 @@ class ResumeGenerationTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
         improver = ImproverService(llm, SkillCanonicalizer())
-        refiner = RefinerService(llm, RefinerSettings(_env_file=None), improver)
+        refiner = RefinerService(llm, RefinerSettings.model_construct(), improver)
         result = await refiner.refine_resume(
             original,
             master,
             "PostgreSQL developer",
             JobKeywords(required_skills=["PostgreSQL"]),
-            features=features(),
         )
         self.assertIn("PostgreSQL", result.refined_data.additional.technicalSkills)
         self.assertEqual(result.keywords_injected, ["PostgreSQL"])
@@ -278,36 +274,125 @@ class ResumeGenerationTest(unittest.IsolatedAsyncioTestCase):
         master = resume()
         llm = AsyncMock(spec=LLMProvider)
         improver = ImproverService(llm, SkillCanonicalizer())
-        settings = RefinerSettings(_env_file=None, enable_keyword_injection=False)
-        for mode in (False, True):
+        settings = RefinerSettings.model_construct(enable_keyword_injection=False)
+        for mode in ("keywords", "full", "cheat"):
             tailored = master.model_copy(deep=True)
             tailored.additional.technicalSkills.append("Rust")
             tailored.workExperience[0].company = "Invented company"
+            tailored.personalInfo.name = "Invented name"
+            tailored.education[0].degree = "Invented degree"
+            tailored.workExperience[0].years = "2030 - 2035"
             result = await RefinerService(llm, settings, improver).refine_resume(
                 tailored,
                 master,
                 "Python SQL Rust",
                 keywords(),
-                features=features(mode),
+                prompt_id=mode,
             )
-            self.assertEqual(
-                result.refined_data.workExperience[0].company, "Robust Inc"
-            )
-            self.assertEqual(
-                "Rust" in result.refined_data.additional.technicalSkills, mode
-            )
-            self.assertEqual(result.unverified_skills, ["Rust"] if mode else [])
+            self.assertEqual(result.refined_data.workExperience[0].company, "Robust Inc")
+            self.assertEqual(result.refined_data.personalInfo, master.personalInfo)
+            self.assertEqual(result.refined_data.education, master.education)
+            self.assertEqual(result.refined_data.workExperience[0].years, master.workExperience[0].years)
+            self.assertEqual("Rust" in result.refined_data.additional.technicalSkills, mode == "cheat")
+            self.assertEqual(result.unverified_skills, ["Rust"] if mode == "cheat" else [])
         llm.complete.assert_not_called()
 
-    def test_phrase_cleanup_only_changes_prose(self):
+    def test_cheat_cannot_change_identity_metadata_or_create_entries(self):
         original = resume()
-        original.summary = "Built robust tools."
-        cleaned, removed = RefinerService.remove_ai_phrases(original)
-        self.assertIn("robust", removed)
-        self.assertEqual(cleaned.personalInfo, original.personalInfo)
-        self.assertEqual(cleaned.workExperience[0].company, "Robust Inc")
-        self.assertEqual(cleaned.workExperience[0].title, "Robust engineer")
-        self.assertEqual(original.summary, "Built robust tools.")
+        service = ImproverService(AsyncMock(spec=LLMProvider), SkillCanonicalizer())
+        edits = [
+            change("personalInfo.name", "replace", "Other", original.personalInfo.name),
+            change("workExperience[0].company", "replace", "Other", "Robust Inc"),
+            change("workExperience[0].years", "replace", "2030", "Jan 2020 - May 2024"),
+            change("education[0].degree", "replace", "PhD", "BSc"),
+            change("education[0].description", "replace", "Invented academic award.", "Studied algorithms."),
+            change("personalProjects[0].name", "replace", "Other", "Tool"),
+            change("workExperience", "append", "Invented job"),
+            change("personalProjects", "append", "Invented project"),
+            change("additional.certificationsTraining", "append", "Invented certificate"),
+        ]
+        result = service.apply_diffs(original, edits, "Rust", keywords(), prompt_id="cheat")
+        self.assertEqual(result.resume, original)
+        self.assertEqual(len(result.rejected_changes), len(edits))
+
+    def test_old_resume_keys_are_read_but_only_camel_case_is_serialized(self):
+        original = resume().model_dump()
+        legacy = resume().model_dump()
+        for current, old in (
+            ("personalInfo", "personal_info"),
+            ("workExperience", "work_experience"),
+            ("personalProjects", "personal_projects"),
+            ("customSections", "custom_sections"),
+            ("sectionMeta", "section_meta"),
+        ):
+            legacy[old] = legacy.pop(current)
+        for section in ("work_experience", "personal_projects"):
+            for entry in legacy[section]:
+                entry["description_styles"] = entry.pop("descriptionStyles")
+        for current, old in (
+            ("technicalSkills", "technical_skills"),
+            ("certificationsTraining", "certifications_training"),
+        ):
+            legacy["additional"][old] = legacy["additional"].pop(current)
+        self.assertEqual(ResumeData.model_validate(legacy).model_dump(), original)
+
+    async def test_cheat_reviews_protected_claims_inside_prose(self):
+        original = resume()
+        llm = AsyncMock(spec=LLMProvider)
+        llm.complete.side_effect = [
+            ImproveDiffResult(changes=[
+                change("summary", "replace", "My name is Other. I hold a PhD from MIT.", original.summary),
+                change("workExperience[0].description", "append", "Joined Google in 2025."),
+                change("workExperience[0].description", "append", "Reduced latency 40% using Rust."),
+                change("additional.technicalSkills", "add_skill", "Rust"),
+            ]),
+            ProtectedClaimsReview(rejected_indices=[0, 1]),
+        ]
+        result = await ImproverService(llm, SkillCanonicalizer()).improve_resume(
+            original, "Rust developer", keywords(), prompt_id="cheat",
+        )
+        self.assertEqual(result.resume.summary, original.summary)
+        self.assertEqual(len(result.rejected_changes), 2)
+        self.assertEqual(result.resume.workExperience[0].description[-1], "Reduced latency 40% using Rust.")
+        self.assertIn("Rust", result.resume.additional.technicalSkills)
+        self.assertIs(llm.complete.await_args.kwargs["schema"], ProtectedClaimsReview)
+
+    async def test_cheat_rejects_invalid_protected_review_indices(self):
+        original = resume()
+        llm = AsyncMock(spec=LLMProvider)
+        llm.complete.return_value = ProtectedClaimsReview(rejected_indices=[99])
+        service = ImproverService(llm, SkillCanonicalizer())
+        proposal = ImproveDiffResult(changes=[
+            change("additional.technicalSkills", "add_skill", "Rust"),
+        ])
+        with self.assertRaises(ValueError):
+            await service.apply_proposal(original, proposal, "Rust", keywords(), prompt_id="cheat")
+        self.assertNotIn("Rust", original.additional.technicalSkills)
+
+    async def test_refinement_keeps_cheat_mode_and_does_not_clean_phrases(self):
+        master = resume()
+        tailored = master.model_copy(deep=True)
+        tailored.summary = "Built robust tools."
+        llm = AsyncMock(spec=LLMProvider)
+        llm.complete.side_effect = [
+            ImproveDiffResult(changes=[
+                change("additional.technicalSkills", "add_skill", "Rust"),
+                change("workExperience[0].description", "append", "Used Rust to reduce latency 40%."),
+            ]),
+            ProtectedClaimsReview(rejected_indices=[]),
+        ]
+        improver = ImproverService(llm, SkillCanonicalizer())
+        result = await RefinerService(llm, RefinerSettings.model_construct(), improver).refine_resume(
+            tailored, master, "Rust developer", JobKeywords(required_skills=["Rust"]), prompt_id="cheat",
+        )
+        self.assertIn("Rust", result.refined_data.additional.technicalSkills)
+        self.assertIn("Used Rust to reduce latency 40%.", result.refined_data.workExperience[0].description)
+        self.assertEqual(result.refined_data.summary, "Built robust tools.")
+        assert result.alignment_report is not None
+        self.assertTrue(result.alignment_report.is_aligned)
+        self.assertEqual(result.unverified_skills, ["Rust"])
+        self.assertNotIn("ai_phrases_removed", result.model_dump())
+        self.assertNotIn("ai_phrases_removed", result.to_stats().model_dump())
 
     async def test_optional_generators_enforce_flags_and_use_typed_inputs(self):
         llm = AsyncMock(spec=LLMProvider)
