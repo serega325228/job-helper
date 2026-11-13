@@ -86,6 +86,8 @@ async def save_resume(
         raw_data=json.dumps(state.raw_answers, ensure_ascii=False),
         data=state.resume,
     )
+    if state.save_key is not None:
+        resume.id = state.save_key
     await runtime.context.resume_service.save_resume(resume)
     return {
         "resume_id": resume.id,

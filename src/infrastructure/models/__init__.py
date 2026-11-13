@@ -1,6 +1,6 @@
 from src.infrastructure.models.base import Base
 from src.infrastructure.models.company import Company
-from src.infrastructure.models.preference_intent import PreferenceIntent
+from src.infrastructure.models.preference import Preference
 from src.infrastructure.models.profile import Profile
 from src.infrastructure.models.resume import Resume
 from src.infrastructure.models.vacancy import Vacancy, VacancyBatch
@@ -15,7 +15,7 @@ __all__ = [
     "Base",
     "CollectedPreview",
     "Company",
-    "PreferenceIntent",
+    "Preference",
     "PreviewCollection",
     "Profile",
     "Resume",

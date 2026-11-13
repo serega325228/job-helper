@@ -105,13 +105,13 @@ class Preference(Base):
 
     profile: Mapped[Profile] = relationship(back_populates="preferences")
     vacancy_matches: Mapped[list[VacancyMatch]] = relationship(
-        back_populates="preferences",
+        back_populates="preference_intent",
     )
 
     __table_args__ = (
         UniqueConstraint(
             "profile_id",
-            "name",
+            "general_title",
             name="uq_preferences_profile_name",
         ),
         CheckConstraint("weight > 0", name="preferences_weight_positive"),

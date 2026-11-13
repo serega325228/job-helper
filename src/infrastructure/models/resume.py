@@ -1,13 +1,18 @@
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from sqlalchemy import ForeignKey, Index, text
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import DateTime, String, Text
 
 from src.infrastructure.models.base import Base
+
+
+if TYPE_CHECKING:
+    from src.infrastructure.models.profile import Profile
 
 
 class ResumeStatus(StrEnum):
@@ -58,7 +63,7 @@ class Resume(Base):
         default=ResumeType.TAILORED,
     )
 
-    raw_data: Mapped[dict] = mapped_column(Text)
+    raw_data: Mapped[str] = mapped_column(Text)
     processed_data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     filename: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -77,6 +82,8 @@ class Resume(Base):
 
     status: Mapped[str] = mapped_column(String, default=ResumeStatus.PENDING)
 
+    profile: Mapped[Profile] = relationship(back_populates="resumes")
+
     # cover_letter: Mapped[str | None] = mapped_column(Text, nullable=True)
     # outreach_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     # interview_prep: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -86,6 +93,6 @@ class Resume(Base):
             "uq_resumes_profile_master_resume",
             "profile_id",
             unique=True,
-            where=text("type = 'master'"),
+            postgresql_where=text("type = 'master'"),
         ),
     )

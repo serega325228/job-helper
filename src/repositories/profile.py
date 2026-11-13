@@ -3,7 +3,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.infrastructure.models.preference_intent import PreferenceIntent
+from src.infrastructure.models.preference import Preference
 from src.infrastructure.models.profile import Profile
 
 
@@ -29,14 +29,14 @@ class ProfileRepository:
         profile_id: UUID,
         *,
         enabled_only: bool = False,
-    ) -> list[PreferenceIntent]:
+    ) -> list[Preference]:
         stmt = (
-            select(PreferenceIntent)
-            .where(PreferenceIntent.profile_id == profile_id)
-            .order_by(PreferenceIntent.created_at, PreferenceIntent.id)
+            select(Preference)
+            .where(Preference.profile_id == profile_id)
+            .order_by(Preference.created_at, Preference.id)
         )
         if enabled_only:
-            stmt = stmt.where(PreferenceIntent.enabled.is_(True))
+            stmt = stmt.where(Preference.enabled.is_(True))
         result = await self._session.scalars(
             stmt.execution_options(populate_existing=True)
         )
@@ -48,12 +48,12 @@ class ProfileRepository:
         preference_ids: list[UUID],
         *,
         enabled_only: bool = False,
-    ) -> list[PreferenceIntent]:
-        stmt = select(PreferenceIntent).where(
-            PreferenceIntent.id.in_(preference_ids),
-            PreferenceIntent.profile_id == profile_id,
+    ) -> list[Preference]:
+        stmt = select(Preference).where(
+            Preference.id.in_(preference_ids),
+            Preference.profile_id == profile_id,
         )
         if enabled_only:
-            stmt = stmt.where(PreferenceIntent.enabled.is_(True))
+            stmt = stmt.where(Preference.enabled.is_(True))
         result = await self._session.scalars(stmt)
         return list(result)

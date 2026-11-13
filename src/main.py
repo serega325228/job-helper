@@ -1,10 +1,12 @@
 from contextlib import asynccontextmanager
+from typing import cast
 
 from dishka.integrations.fastapi import setup_dishka as setup_fastapi_dishka
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.formparsers import MultiPartParser
+from starlette.types import ExceptionHandler
 from structlog import get_logger
 
 from src.config.logging import configure_logging
@@ -20,13 +22,12 @@ from src.routers.config import (
 )
 from src.routers.config import router as config_router
 from src.routers.health import router as health_router
+from src.routers.resume import router as resume_router
 from src.routers.vacancy import router as vacancy_router
 
 settings = get_settings()
 
 logger = get_logger()
-
-# Create agent somewhere, maybe in settings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -50,9 +51,11 @@ app = FastAPI(
 )
 
 container = create_container()
-app.add_exception_handler(ConfigError, config_error_handler)
-app.add_exception_handler(LLMError, llm_error_handler)
-app.add_exception_handler(RequestValidationError, config_validation_error_handler)
+app.add_exception_handler(ConfigError, cast(ExceptionHandler, config_error_handler))
+app.add_exception_handler(LLMError, cast(ExceptionHandler, llm_error_handler))
+app.add_exception_handler(
+    RequestValidationError, cast(ExceptionHandler, config_validation_error_handler)
+)
 setup_fastapi_dishka(
     container=container,
     app=app,
@@ -66,12 +69,14 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Resume-Thread-ID"],
 )
 
 # Include routers
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(config_router, prefix="/api/v1")
 app.include_router(vacancy_router, prefix="/api/v1")
+app.include_router(resume_router, prefix="/api/v1")
 
 
 @app.get("/")

@@ -21,16 +21,16 @@ class ProfileRepositoryTests(unittest.IsolatedAsyncioTestCase):
         statement = session.scalars.await_args.args[0]
         compiled = statement.compile(dialect=postgresql.dialect())
         sql = str(compiled)
-        self.assertIn("preference_intents.profile_id =", sql)
+        self.assertIn("preferences.profile_id =", sql)
         self.assertIn(
-            "ORDER BY preference_intents.created_at, preference_intents.id",
+            "ORDER BY preferences.created_at, preferences.id",
             sql,
         )
         self.assertEqual(compiled.params["profile_id_1"], profile_id)
         await repository.get_preferences_by_profile_id(profile_id, enabled_only=True)
         statement = session.scalars.await_args.args[0]
         self.assertIn(
-            "preference_intents.enabled IS true",
+            "preferences.enabled IS true",
             str(statement.compile(dialect=postgresql.dialect())),
         )
 

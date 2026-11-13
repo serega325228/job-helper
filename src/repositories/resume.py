@@ -31,9 +31,17 @@ class ResumeRepository:
     async def has_master_resume(self, profile_id: UUID) -> bool:
         stmt = select(
             exists().where(
-                Resume.resume_type == ResumeType.MASTER,
+                Resume.type == ResumeType.MASTER,
                 Resume.profile_id == profile_id,
             )
         )
         result = await self._session.scalar(stmt)
         return result if result else False
+
+    async def get_master(self, profile_id: UUID, resume_id: UUID | None = None) -> Resume | None:
+        stmt = select(Resume).where(
+            Resume.profile_id == profile_id, Resume.type == ResumeType.MASTER
+        )
+        if resume_id is not None:
+            stmt = stmt.where(Resume.id == resume_id)
+        return await self._session.scalar(stmt)

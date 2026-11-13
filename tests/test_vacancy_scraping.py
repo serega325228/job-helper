@@ -10,7 +10,7 @@ from taskiq_aio_pika.broker import AioPikaBroker
 
 from src.config.settings import Settings
 from src.di.container import create_container
-from src.infrastructure.models.preference_intent import PreferenceIntent
+from src.infrastructure.models.preference import Preference
 from src.infrastructure.models.vacancy import Vacancy, VacancyBatch
 from src.infrastructure.models.vacancy_match import VacancyMatch
 from src.infrastructure.models.vacancy_preview import (
@@ -96,7 +96,7 @@ class VacancyPipelineTests(unittest.IsolatedAsyncioTestCase):
     def cohort(self, rerank_limit=1):
         now = datetime.now(UTC)
         preferences = [
-            PreferenceIntent(
+            Preference(
                 id=uuid4(),
                 enabled=True,
                 weight=1,

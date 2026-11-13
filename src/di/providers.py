@@ -12,30 +12,33 @@ from crawlee.crawlers._playwright import PlaywrightCrawler
 from crawlee.events import LocalEventManager
 from crawlee.storage_clients._file_system import FileSystemStorageClient
 from dishka import FromComponent, Provider, Scope, provide
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph.state import CompiledStateGraph
 from playwright.async_api import Playwright, async_playwright
-from psycopg_pool.pool_async import AsyncConnectionPool
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agents.resume.graph import create_resume_agent
+from src.agents.resume.state import MasterResumeContext, MasterResumeState
 from src.config.settings import (
     Settings,
     get_settings,
 )
 from src.exceptions.config import ConfigError
+from src.exceptions.resume import ResumeError
 from src.infrastructure.db.engine import Database
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
+from src.infrastructure.document_parser.document_parser import DocumentParser
 from src.infrastructure.embedder.llama_server import LlamaServerEmbedder
 from src.infrastructure.laya.laya_provider import LayaProvider
 from src.infrastructure.llm.llm import LLMConfigManager, LLMProvider
 from src.infrastructure.pdf.pdf import PDFRender
 from src.infrastructure.reranker.llama_server import LlamaServerReranker
+from src.infrastructure.resume_turn_guard import ResumeTurnGuard
 from src.infrastructure.vacancy_sources.hh.client import HhApiClient
 from src.infrastructure.vacancy_sources.hh.source import HhVacancySource
 from src.infrastructure.vacancy_sources.linkedin.source import LinkedInVacancySource
 from src.ports.embedder import Embedder
 from src.ports.reranker import Reranker
+from src.ports.vacancy_normalizer import VacancyNormalizer
 from src.repositories.profile import ProfileRepository
 from src.repositories.prompt import PromptRepository
 from src.repositories.resume import ResumeRepository
@@ -46,8 +49,10 @@ from src.schemas.llm import FeatureConfig
 from src.services.cover_letter import CoverLetterService
 from src.services.improver import ImproverService
 from src.services.interview_prep import InterviewPrepService
+from src.services.master_resume import MasterResumeService
 from src.services.profile import ProfileService
 from src.services.refiner import RefinerService
+from src.services.resume import ResumeService
 from src.services.scoring import ScoringService
 from src.services.sercurity import SecurityService
 from src.services.skill_canonicalization import SkillCanonicalizer
@@ -66,33 +71,44 @@ class ConfigProvider(Provider):
         return get_settings()
 
 
+def checkpoint_conninfo(settings: Settings) -> str:
+    return settings.database.url.set(drivername="postgresql").render_as_string(
+        hide_password=False
+    )
+
+
 class AgentProvider(Provider):
     @provide(scope=Scope.APP)
-    async def pool(
-        self,
-        settings: Settings,
-    ) -> AsyncIterator[AsyncConnectionPool]:
-        pool = AsyncConnectionPool(
-            conninfo=str(settings.database.url),
-            max_size=settings.database.pool_size,
-            open=False,
-        )
-        yield pool
-        await pool.close()
-
-    @provide(scope=Scope.APP) # Change if need different agents work simultaneously
-    async def checkpointer(
-        self,
-        pool: AsyncConnectionPool,
-    ) -> AsyncPostgresSaver:
-        return AsyncPostgresSaver(pool)
+    def resume_turn_guard(self, settings: Settings) -> ResumeTurnGuard:
+        return ResumeTurnGuard(checkpoint_conninfo(settings))
 
     @provide(scope=Scope.APP)
     async def resume_agent(
-        self,
-        checkpointer: AsyncPostgresSaver,
-    ) -> CompiledStateGraph:
-        return create_resume_agent(checkpointer)
+        self, settings: Settings
+    ) -> AsyncIterator[CompiledStateGraph[
+        MasterResumeState, MasterResumeContext, MasterResumeState, MasterResumeState
+    ]]:
+        # Lazy imports keep content reads/imports available without system libpq.
+        try:
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+            from psycopg import AsyncConnection
+            from psycopg.rows import DictRow, dict_row
+            from psycopg_pool import AsyncConnectionPool
+        except ImportError:
+            raise ResumeError("resume_checkpointer_unavailable", 503) from None
+        pool = AsyncConnectionPool[AsyncConnection[DictRow]](
+            conninfo=checkpoint_conninfo(settings),
+            min_size=0,
+            max_size=settings.database.pool_size,
+            open=False,
+            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        )
+        try:
+            await pool.open()
+            # Tables must be supplied externally; never call saver.setup().
+            yield create_resume_agent(AsyncPostgresSaver(pool))
+        finally:
+            await pool.close()
 
 
 class InfrastructureProvider(Provider):
@@ -319,6 +335,14 @@ class RepositoryProvider(Provider):
 
 
 class ServiceProvider(Provider):
+    @provide(scope=Scope.REQUEST)
+    def vacancy_normalizer(self) -> VacancyNormalizer:
+        # No concrete native adapter exists yet; do not simulate normalization.
+        raise ConfigError(field="vacancy_normalizer")
+
+    document_parser = provide(DocumentParser, scope=Scope.REQUEST)
+    resume_service = provide(ResumeService, scope=Scope.REQUEST)
+    master_resume_service = provide(MasterResumeService, scope=Scope.REQUEST)
     improver_service = provide(ImproverService, scope=Scope.REQUEST)
     interview_prep_service = provide(InterviewPrepService, scope=Scope.REQUEST)
     profile_service = provide(ProfileService, scope=Scope.REQUEST)

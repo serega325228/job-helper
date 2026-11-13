@@ -1,7 +1,7 @@
 import unittest
 from datetime import UTC, datetime
 
-from src.infrastructure.models.preference_intent import PreferenceIntent
+from src.infrastructure.models.preference import Preference
 from src.infrastructure.models.profile import Profile
 from src.schemas.vacancy import (
     VacancyHardFilters,
@@ -24,10 +24,10 @@ def preview(**values) -> VacancyPreview:
     )
 
 
-def preference(**values) -> PreferenceIntent:
-    return PreferenceIntent(
+def preference(**values) -> Preference:
+    return Preference(
         **{
-            "name": "Python",
+            "general_title": "Python",
             "enabled": True,
             "target_titles": ["Python developer"],
             "excluded_titles": [],

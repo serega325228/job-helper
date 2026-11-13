@@ -345,7 +345,7 @@ class RuntimeConfigTest(unittest.IsolatedAsyncioTestCase):
             dialect=postgresql.dialect()
         )
         self.assertIn("resumes.profile_id", str(statement))
-        self.assertIn("resumes.resume_type", str(statement))
+        self.assertIn("resumes.type", str(statement))
         self.assertIn(profile_id, statement.params.values())
 
 

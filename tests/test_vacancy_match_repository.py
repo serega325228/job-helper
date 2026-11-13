@@ -46,7 +46,7 @@ class VacancyMatchRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("LATERAL", sql)
         self.assertNotIn("UNION", sql)
         self.assertIn("vacancies.id IN", sql)
-        self.assertIn("preference_intents.id IN", sql)
+        self.assertIn("preferences.id IN", sql)
 
 
 if __name__ == "__main__":

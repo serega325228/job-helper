@@ -22,6 +22,9 @@ data/.config.*
 data/.secre_key.tmp
 *.gguf
 *.md
+# Track persistent native project context and feature handoffs.
+!/AGENTS.md
+!/docs/**/*.md
 tests/*
 !tests/test_llm_provider.py
 !tests/test_runtime_config.py
@@ -33,6 +36,7 @@ tests/*
 !tests/test_llama_server.py
 !tests/test_agent_turns.py
 !tests/test_agent_services.py
+!tests/test_master_resume.py
 uv.lock
 
 # Keep imported frontend documentation and backend reference lockfile.

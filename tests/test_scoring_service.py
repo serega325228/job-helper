@@ -3,7 +3,7 @@ from unittest.mock import Mock
 from uuid import uuid4
 
 from src.infrastructure.laya.laya_provider import LayaProvider
-from src.infrastructure.models.preference_intent import PreferenceIntent
+from src.infrastructure.models.preference import Preference
 from src.infrastructure.models.profile import Profile
 from src.infrastructure.models.vacancy import Vacancy
 from src.schemas.vacancy import VacancySoftConditions
@@ -35,7 +35,7 @@ def make_profile() -> Profile:
     return Profile(
         id=uuid4(),
         name="Candidate",
-        raw_story="Backend developer",
+        raw_data="Backend developer",
         profile_summary="Backend engineer with production experience",
         skills=["Golang", "Postgres"],
         experience=["Four years of backend development"],
@@ -77,11 +77,11 @@ def make_vacancy() -> Vacancy:
     )
 
 
-def make_preference(profile_id) -> PreferenceIntent:
-    return PreferenceIntent(
+def make_preference(profile_id) -> Preference:
+    return Preference(
         id=uuid4(),
         profile_id=profile_id,
-        name="Backend",
+        general_title="Backend",
         description="Backend product development",
         target_titles=["Backend Developer"],
         required_skills=["Postgres", "Go"],
@@ -119,7 +119,7 @@ class ScoringServiceTests(unittest.IsolatedAsyncioTestCase):
         profile = make_profile()
         first_preference = make_preference(profile.id)
         second_preference = make_preference(profile.id)
-        second_preference.name = "Platform"
+        second_preference.general_title = "Platform"
         second_preference.target_titles = ["Platform Engineer"]
         vacancies = [make_vacancy() for _ in range(3)]
         preferences_by_vacancy = {

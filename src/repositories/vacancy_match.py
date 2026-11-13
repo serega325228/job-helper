@@ -5,7 +5,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.functions import func
 
-from src.infrastructure.models.preference_intent import PreferenceIntent
+from src.infrastructure.models.preference import Preference
 from src.infrastructure.models.vacancy import Vacancy
 from src.infrastructure.models.vacancy_match import VacancyMatch
 from src.repositories.vacancy_filters import build_vacancy_hard_filter_conditions
@@ -130,15 +130,15 @@ class VacancyMatchRepository:
     ) -> list[VacancyEmbeddingSearchResult]:
         # ponytail: pairwise scoring scales with cohort × preferences; use ANN for substantially larger cohorts.
         title = 1 - Vacancy.title_embedding.cosine_distance(
-            PreferenceIntent.title_embedding
+            Preference.title_embedding
         )
         content = 1 - Vacancy.content_embedding.cosine_distance(
-            PreferenceIntent.content_embedding
+            Preference.content_embedding
         )
         statement = (
             select(
                 Vacancy.id.label("vacancy_id"),
-                PreferenceIntent.id.label("preference_id"),
+                Preference.id.label("preference_id"),
                 title.label("title_similarity"),
                 content.label("content_similarity"),
                 (title * title_weight + content * (1 - title_weight)).label(
@@ -146,19 +146,19 @@ class VacancyMatchRepository:
                 ),
             )
             .select_from(Vacancy)
-            .join(PreferenceIntent, true())
+            .join(Preference, true())
             .where(
                 Vacancy.id.in_(vacancy_ids),
-                PreferenceIntent.id.in_(preference_ids),
-                PreferenceIntent.profile_id == profile_id,
-                PreferenceIntent.enabled.is_(True),
+                Preference.id.in_(preference_ids),
+                Preference.profile_id == profile_id,
+                Preference.enabled.is_(True),
                 *build_vacancy_hard_filter_conditions(hard_filters),
                 Vacancy.title_embedding.is_not(None),
                 Vacancy.content_embedding.is_not(None),
-                PreferenceIntent.title_embedding.is_not(None),
-                PreferenceIntent.content_embedding.is_not(None),
+                Preference.title_embedding.is_not(None),
+                Preference.content_embedding.is_not(None),
             )
-            .order_by(Vacancy.id, PreferenceIntent.id)
+            .order_by(Vacancy.id, Preference.id)
         )
         if selection_context:
             statement = statement.where(
@@ -168,7 +168,7 @@ class VacancyMatchRepository:
                             Vacancy.id.in_(
                                 [UUID(value) for value in scope["vacancy_ids"]]
                             ),
-                            PreferenceIntent.id.in_(
+                            Preference.id.in_(
                                 [UUID(value) for value in scope["preference_ids"]]
                             ),
                             *build_vacancy_hard_filter_conditions(

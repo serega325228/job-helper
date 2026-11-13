@@ -7,7 +7,7 @@ from uuid import UUID
 
 from src.infrastructure.laya.laya_provider import LayaProvider
 from src.infrastructure.laya.questions import MATCH_QUESTIONS
-from src.infrastructure.models.preference_intent import PreferenceIntent
+from src.infrastructure.models.preference import Preference
 from src.infrastructure.models.profile import Profile
 from src.infrastructure.models.vacancy import Vacancy
 from src.ports.embedder import Embedder
@@ -70,8 +70,8 @@ class ScoringService:
         self._laya = laya
         self._evaluator = evaluator
 
-    def embedding_texts(self, entity: Vacancy | PreferenceIntent) -> list[str]:
-        if isinstance(entity, PreferenceIntent):
+    def embedding_texts(self, entity: Vacancy | Preference) -> list[str]:
+        if isinstance(entity, Preference):
             return [
                 "Instruct: Given a job search query, retrieve relevant job vacancies"
                 f"\nQuery: {text}"
@@ -82,7 +82,7 @@ class ScoringService:
             ]
         return [entity.title, f"{entity.title}\n{build_vacancy_search_text(entity)}"]
 
-    def embedding_fingerprint(self, entity: Vacancy | PreferenceIntent) -> str:
+    def embedding_fingerprint(self, entity: Vacancy | Preference) -> str:
         return hashlib.sha256(
             repr((self._embedder.model_name, self.embedding_texts(entity))).encode()
         ).hexdigest()
@@ -150,7 +150,7 @@ class ScoringService:
 
     def compare_preference(
         self,
-        preference: PreferenceIntent,
+        preference: Preference,
         vacancy: Vacancy,
     ) -> PreferenceComparison:
         soft = VacancySoftConditions.model_validate(vacancy.soft_conditions)
@@ -235,7 +235,7 @@ class ScoringService:
     async def laya_match_vacancies(
         self,
         profile: Profile,
-        preferences_by_vacancy: dict[UUID, PreferenceIntent],
+        preferences_by_vacancy: dict[UUID, Preference],
         vacancies: dict[UUID, Vacancy],
         *,
         batch_size: int = 32,
@@ -274,7 +274,7 @@ class ScoringService:
 
     @staticmethod
     def make_laya_match_state(
-        vacancy: Vacancy, preference: PreferenceIntent, profile: Profile
+        vacancy: Vacancy, preference: Preference, profile: Profile
     ) -> dict:
         candidate_state = {
             "target_role": build_preference_title_text(preference),
@@ -307,7 +307,7 @@ class ScoringService:
         self,
         profile: Profile,
         vacancies: list[Vacancy],
-        preferences_by_vacancy: dict[UUID, PreferenceIntent],
+        preferences_by_vacancy: dict[UUID, Preference],
     ) -> dict[UUID, VacancyRerankScores]:
         if not vacancies:
             return {}
@@ -347,11 +347,11 @@ class ScoringService:
     async def _rerank_preferences(
         self,
         vacancies: list[Vacancy],
-        preferences_by_vacancy: dict[UUID, PreferenceIntent],
+        preferences_by_vacancy: dict[UUID, Preference],
         documents: list[str],
     ) -> dict[UUID, float]:
         groups: dict[UUID, list[int]] = defaultdict(list)
-        preferences: dict[UUID, PreferenceIntent] = {}
+        preferences: dict[UUID, Preference] = {}
         for index, vacancy in enumerate(vacancies):
             preference = preferences_by_vacancy[vacancy.id]
             groups[preference.id].append(index)
@@ -440,7 +440,7 @@ class ScoringService:
 
     def _preference_seniority_score(
         self,
-        preference: PreferenceIntent,
+        preference: Preference,
         vacancy: Vacancy,
     ) -> float | None:
         actual = self._seniority_rank(vacancy.seniority)
@@ -457,7 +457,7 @@ class ScoringService:
 
     def _same_currency(
         self,
-        preference: PreferenceIntent,
+        preference: Preference,
         vacancy: Vacancy,
     ) -> bool:
         return (

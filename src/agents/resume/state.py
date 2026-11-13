@@ -26,6 +26,7 @@ class MasterResumeState(BaseModel):
     missing_fields: list[str] = Field(default_factory=list)
     next_question: NextQuestion | None = None
     last_answer: str = ""
+    save_key: UUID | None = None
     resume_id: UUID | None = None
 
 

@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import Enum, Float, ForeignKey, UniqueConstraint
@@ -8,10 +8,13 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import Boolean, DateTime, String, Text
 
 from src.infrastructure.models.base import Base
-from src.infrastructure.models.preference import Preference
-from src.infrastructure.models.profile import Profile
-from src.infrastructure.models.vacancy import Vacancy
 from src.schemas.vacancy import ProcessingStatus
+
+
+if TYPE_CHECKING:
+    from src.infrastructure.models.preference import Preference
+    from src.infrastructure.models.profile import Profile
+    from src.infrastructure.models.vacancy import Vacancy
 
 
 class VacancyMatch(Base):
@@ -29,7 +32,7 @@ class VacancyMatch(Base):
         index=True,
     )
     preference_intent_id: Mapped[UUID] = mapped_column(
-        ForeignKey("preference_intents.id", ondelete="CASCADE"),
+        ForeignKey("preferences.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )

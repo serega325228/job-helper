@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 from src.schemas.vacancy import NormalizedVacancy, VacancySoftConditions
 
 if TYPE_CHECKING:
-    from src.infrastructure.models.preference_intent import PreferenceIntent
+    from src.infrastructure.models.preference import Preference
     from src.infrastructure.models.profile import Profile
     from src.infrastructure.models.vacancy import Vacancy
 
@@ -50,7 +50,7 @@ def build_vacancy_search_text(
     return "\n".join(sections) or f"Position: {vacancy.title.strip()}"
 
 
-def build_preference_search_text(preference: PreferenceIntent) -> str:
+def build_preference_search_text(preference: Preference) -> str:
     sections: list[str] = []
 
     if preference.description:
@@ -70,14 +70,14 @@ def build_preference_search_text(preference: PreferenceIntent) -> str:
             f"Preferred companies: {_join(preference.preferred_companies)}",
         )
 
-    return "\n".join(sections) or f"Target position: {preference.name.strip()}"
+    return "\n".join(sections) or f"Target position: {preference.general_title.strip()}"
 
 
-def build_preference_title_text(preference: PreferenceIntent) -> str:
+def build_preference_title_text(preference: Preference) -> str:
     titles = _join(preference.target_titles)
     if titles:
-        return f"{preference.name.strip()}: {titles}"
-    return preference.name.strip()
+        return f"{preference.general_title.strip()}: {titles}"
+    return preference.general_title.strip()
 
 
 def build_profile_search_text(profile: Profile) -> str:
