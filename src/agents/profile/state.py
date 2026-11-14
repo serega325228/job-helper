@@ -29,6 +29,11 @@ class ProfileState(BaseModel):
     next_question: NextQuestion | None = None
     last_answer: str = ""
     approved: bool = False
+    preference_text: str = ""
+    preferences_approved: bool = False
+    saved: bool = False
+    source_revision: str | None = None
+    save_key: str | None = None
 
 
 @dataclass(slots=True)

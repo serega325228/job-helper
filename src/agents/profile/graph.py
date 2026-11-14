@@ -4,6 +4,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from src.agents.profile.nodes import (
     ask_user,
+    preferences_review,
     prepare_question,
     profile_review,
     save_profile,
@@ -20,6 +21,7 @@ def create_profile_agent(
     graph.add_node("prepare_question", prepare_question)
     graph.add_node("ask_user", ask_user)
     graph.add_node("profile_review", profile_review)
+    graph.add_node("preferences_review", preferences_review)
     graph.add_node("save_profile", save_profile)
 
     graph.add_edge(START, "start")
@@ -32,8 +34,12 @@ def create_profile_agent(
     graph.add_edge("ask_user", "prepare_question")
     graph.add_conditional_edges(
         "profile_review",
-        lambda state: "save_profile" if state.approved else "prepare_question",
-        {"save_profile": "save_profile", "prepare_question": "prepare_question"},
+        lambda state: (
+            "preferences_review" if state.approved and state.preferences
+            else "save_profile" if state.approved else "prepare_question"
+        ),
+        {"preferences_review": "preferences_review", "save_profile": "save_profile", "prepare_question": "prepare_question"},
     )
+    graph.add_edge("preferences_review", "save_profile")
     graph.add_edge("save_profile", END)
     return graph.compile(checkpointer=checkpointer)

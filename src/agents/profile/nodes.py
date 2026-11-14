@@ -22,10 +22,15 @@ async def prepare_question(
         last_answer=state.last_answer,
         last_question=state.next_question,
         raw_answers=state.raw_answers,
+        preference_text=state.preference_text,
     )
+    drafts = out.preferences
+    if drafts:
+        drafts = await runtime.context.profile_service.prepare_preference_drafts(state.profile_id, drafts)
     return {
         "profile": out.profile_data,
-        "preferences": out.preferences,
+        "preferences": drafts,
+        "preferences_approved": False,
         "next_question": out.next_question,
         "missing_fields": out.missing_fields,
         "approved": False,
@@ -36,12 +41,12 @@ async def ask_user(state: ProfileState, runtime: Runtime[ProfileContext]) -> dic
     question = state.next_question
     if not state.missing_fields or question is None:
         raise ValueError("Cannot ask a question without unresolved missing_fields")
-    payload = question.model_dump()
+    payload = {"kind": "question", **question.model_dump()}
     while True:
         answer = interrupt(payload)
         if isinstance(answer, str):
             break
-        payload = {**question.model_dump(), "error": "Please answer with text."}
+        payload = {"kind": "question", **question.model_dump(), "error": "Please answer with text."}
     # Only the next analysis can decide whether this answer resolves the gap.
     return {
         "last_answer": answer,
@@ -51,6 +56,7 @@ async def ask_user(state: ProfileState, runtime: Runtime[ProfileContext]) -> dic
 
 async def profile_review(state: ProfileState, runtime: Runtime[ProfileContext]) -> dict:
     payload = {
+        "kind": "profile_review",
         "profile": state.profile.model_dump(mode="json"),
         "preferences": [item.model_dump(mode="json") for item in state.preferences],
         "message": "Please review and edit if needed. Edits will be re-analyzed before approval.",
@@ -90,12 +96,41 @@ async def profile_review(state: ProfileState, runtime: Runtime[ProfileContext]) 
     return {"profile": profile, "preferences": preferences, "approved": approved}
 
 
+async def preferences_review(state: ProfileState, runtime: Runtime[ProfileContext]) -> dict:
+    existing = await runtime.context.profile_service.get_preferences_by_profile_id(state.profile_id)
+    payload = {
+        "kind": "preferences_review",
+        "drafts": [item.model_dump(mode="json") for item in state.preferences],
+        "existing": [
+            {"id": str(item.id), "enabled": item.enabled, **PreferenceData.model_validate(item).model_dump(mode="json")}
+            for item in existing
+        ],
+        "message": "Approve or edit new preferences, or decline to keep existing preferences only.",
+    }
+    while True:
+        decision = interrupt(payload)
+        try:
+            if not isinstance(decision, dict) or not isinstance(decision.get("approved"), bool):
+                raise ValueError("A boolean approved value is required")
+            drafts = TypeAdapter(list[PreferenceData]).validate_python(
+                decision.get("preferences", state.preferences)
+            ) if decision["approved"] else []
+            break
+        except ValueError:
+            payload = {**payload, "error": "Provide valid preferences and a boolean approved value."}
+    return {"preferences": drafts, "preferences_approved": decision["approved"]}
+
+
 async def save_profile(state: ProfileState, runtime: Runtime[ProfileContext]) -> dict:
     if state.missing_fields or not state.approved:
         raise ValueError("Only a reviewed profile with no missing_fields can be saved")
+    if state.preferences and not state.preferences_approved:
+        raise ValueError("New preferences require separate confirmation")
     await runtime.context.profile_service.update_profile(
         profile_id=state.profile_id,
         data=state.profile,
         preferences=state.preferences,
+        expected_revision=state.source_revision,
+        save_key=state.save_key,
     )
-    return {"messages": [("ai", "Profile saved successfully.")]}
+    return {"saved": True, "messages": [("ai", "Profile saved successfully.")]}

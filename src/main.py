@@ -24,6 +24,7 @@ from src.routers.config import router as config_router
 from src.routers.health import router as health_router
 from src.routers.resume import router as resume_router
 from src.routers.vacancy import router as vacancy_router
+from src.routers.wizard import router as wizard_router
 
 settings = get_settings()
 
@@ -69,7 +70,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Resume-Thread-ID"],
+    expose_headers=["X-Resume-Thread-ID", "X-Wizard-Profile-ID", "X-Wizard-Thread-ID"],
 )
 
 # Include routers
@@ -77,6 +78,7 @@ app.include_router(health_router, prefix="/api/v1")
 app.include_router(config_router, prefix="/api/v1")
 app.include_router(vacancy_router, prefix="/api/v1")
 app.include_router(resume_router, prefix="/api/v1")
+app.include_router(wizard_router, prefix="/api/v1")
 
 
 @app.get("/")

@@ -12,10 +12,13 @@ from crawlee.crawlers._playwright import PlaywrightCrawler
 from crawlee.events import LocalEventManager
 from crawlee.storage_clients._file_system import FileSystemStorageClient
 from dishka import FromComponent, Provider, Scope, provide
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 from playwright.async_api import Playwright, async_playwright
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agents.profile.graph import create_profile_agent
+from src.agents.profile.state import ProfileContext, ProfileState
 from src.agents.resume.graph import create_resume_agent
 from src.agents.resume.state import MasterResumeContext, MasterResumeState
 from src.config.settings import (
@@ -63,6 +66,7 @@ from src.services.vacancy_scraping import (
     CrawlerFactory,
     VacancyScrapingService,
 )
+from src.services.wizard import WizardService
 
 
 class ConfigProvider(Provider):
@@ -83,11 +87,9 @@ class AgentProvider(Provider):
         return ResumeTurnGuard(checkpoint_conninfo(settings))
 
     @provide(scope=Scope.APP)
-    async def resume_agent(
+    async def checkpoint_saver(
         self, settings: Settings
-    ) -> AsyncIterator[CompiledStateGraph[
-        MasterResumeState, MasterResumeContext, MasterResumeState, MasterResumeState
-    ]]:
+    ) -> AsyncIterator[BaseCheckpointSaver]:
         # Lazy imports keep content reads/imports available without system libpq.
         try:
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -106,9 +108,21 @@ class AgentProvider(Provider):
         try:
             await pool.open()
             # Tables must be supplied externally; never call saver.setup().
-            yield create_resume_agent(AsyncPostgresSaver(pool))
+            yield AsyncPostgresSaver(pool)
         finally:
             await pool.close()
+
+    @provide(scope=Scope.APP)
+    def resume_agent(self, saver: BaseCheckpointSaver) -> CompiledStateGraph[
+        MasterResumeState, MasterResumeContext, MasterResumeState, MasterResumeState
+    ]:
+        return create_resume_agent(saver)
+
+    @provide(scope=Scope.APP)
+    def profile_agent(self, saver: BaseCheckpointSaver) -> CompiledStateGraph[
+        ProfileState, ProfileContext, ProfileState, ProfileState
+    ]:
+        return create_profile_agent(saver)
 
 
 class InfrastructureProvider(Provider):
@@ -343,6 +357,7 @@ class ServiceProvider(Provider):
     document_parser = provide(DocumentParser, scope=Scope.REQUEST)
     resume_service = provide(ResumeService, scope=Scope.REQUEST)
     master_resume_service = provide(MasterResumeService, scope=Scope.REQUEST)
+    wizard_service = provide(WizardService, scope=Scope.REQUEST)
     improver_service = provide(ImproverService, scope=Scope.REQUEST)
     interview_prep_service = provide(InterviewPrepService, scope=Scope.REQUEST)
     profile_service = provide(ProfileService, scope=Scope.REQUEST)

@@ -435,7 +435,7 @@ class CompositionTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_libpq_is_bounded_without_schema_setup(self):
         from src.config.settings import Settings
         with patch.dict("sys.modules", {"langgraph.checkpoint.postgres.aio": None}):
-            generator = AgentProvider().resume_agent(Settings())
+            generator = AgentProvider().checkpoint_saver(Settings())
             with self.assertRaises(ResumeError) as caught:
                 await anext(generator)
             self.assertEqual(caught.exception.status_code, 503)

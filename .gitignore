@@ -37,6 +37,7 @@ tests/*
 !tests/test_agent_turns.py
 !tests/test_agent_services.py
 !tests/test_master_resume.py
+!tests/test_story_wizard.py
 uv.lock
 
 # Keep imported frontend documentation and backend reference lockfile.

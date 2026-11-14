@@ -1,10 +1,15 @@
 import json
+from hashlib import sha256
 from uuid import UUID
 
 from src.agents.profile.schemas import ProfileOutput
 from src.agents.resume.schemas import ResumeOutput
 from src.agents.schemas import NextQuestion
-from src.exceptions.profile import AnalysisError, ProfileNotFoundError
+from src.exceptions.profile import (
+    AnalysisError,
+    ProfileNotFoundError,
+    ProfileWorkflowError,
+)
 from src.infrastructure.db.sqlalchemy_unit_of_work import SqlAlchemyUnitOfWork
 from src.infrastructure.llm.llm import LLMProvider
 from src.infrastructure.models.preference import Preference
@@ -15,6 +20,18 @@ from src.repositories.prompt import PromptRepository
 from src.schemas.preference import PreferenceData
 from src.schemas.profile import ProfileData
 from src.schemas.resume import ResumeData
+from src.services.preference_catalog import (
+    CATALOG_VERSION,
+    ROLE_TITLES,
+    preference_values,
+    reconcile_preferences,
+)
+
+
+def profile_revision(profile: Profile) -> str:
+    stored = dict(profile.processed_data or {})
+    stored.pop("_wizard_save_key", None)
+    return sha256(json.dumps(stored, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 class ProfileService:
@@ -43,7 +60,8 @@ class ProfileService:
         if profile is None:
             raise ProfileNotFoundError(profile_id)
 
-        stored = profile.processed_data or {}
+        stored = dict(profile.processed_data or {})
+        stored.pop("_wizard_save_key", None)
         # New saves retain the whole validated profile, including custom sections,
         # in the existing JSON column. Older rows may contain only extracted facts.
         if {"name", "raw_data", "processed_data", "profile_summary"} <= stored.keys():
@@ -85,6 +103,7 @@ class ProfileService:
         *,
         last_question: NextQuestion | None = None,
         raw_answers: list[dict] | None = None,
+        preference_text: str = "",
     ) -> ProfileOutput:
         try:
             async with self._uow as uow:
@@ -105,6 +124,11 @@ class ProfileService:
                         "last_question": last_question.model_dump() if last_question else None,
                         "answer_text": last_answer,
                         "answer_history": raw_answers or [],
+                        "preference_text": preference_text,
+                        "preference_title_catalog": {
+                            "version": CATALOG_VERSION,
+                            "roles": [role.model_dump(mode="json") for role in ROLE_TITLES],
+                        },
                     },
                     ensure_ascii=False,
                 ),
@@ -123,11 +147,18 @@ class ProfileService:
         profile_id: UUID,
         data: ProfileData,
         preferences: list[PreferenceData] | None = None,
+        *,
+        expected_revision: str | None = None,
+        save_key: str | None = None,
     ) -> Profile:
         async with self._uow as uow:
             profile = await uow.profiles.get_by_id(profile_id, lock=True)
             if profile is None:
                 raise ProfileNotFoundError(profile_id)
+            if save_key and (profile.processed_data or {}).get("_wizard_save_key") == save_key:
+                return profile
+            if expected_revision is not None and profile_revision(profile) != expected_revision:
+                raise ProfileWorkflowError("wizard_profile_changed", 409)
             data = data.model_copy(update={"raw_data": profile.raw_data})
             profile.name = data.name
             profile.apply_analysis(
@@ -140,14 +171,35 @@ class ProfileService:
             )
             profile.contacts = data.contacts
             profile.processed_data = data.model_dump(mode="json")
-            # Do not replace existing search preferences as a side effect of analysis.
-            if preferences and not profile.preferences:
-                profile.preferences.extend(
-                    Preference(profile_id=profile.id, **item.model_dump())
-                    for item in preferences
-                )
+            if save_key:
+                profile.processed_data["_wizard_save_key"] = save_key
+            # Only confirmed drafts reach this boundary. Reconcile again under the
+            # profile row lock to handle retries and concurrent wizard threads.
+            active = [PreferenceData.model_validate(item) for item in profile.preferences if item.enabled]
+            additions = reconcile_preferences(
+                preferences or [], active,
+                occupied_titles=[item.general_title for item in profile.preferences],
+            )
+            profile.preferences.extend(
+                Preference(profile_id=profile.id, **preference_values(item))
+                for item in additions
+            )
             profile.analysis_status = AnalysisStatus.COMPLETED
         return profile
+
+    async def prepare_preference_drafts(
+        self, profile_id: UUID, drafts: list[PreferenceData]
+    ) -> list[PreferenceData]:
+        existing = await self.get_preferences_by_profile_id(profile_id)
+        return reconcile_preferences(
+            drafts,
+            [PreferenceData.model_validate(item) for item in existing if item.enabled],
+            occupied_titles=[item.general_title for item in existing],
+        )
+
+    async def has_master_resume(self, profile_id: UUID) -> bool:
+        async with self._uow as uow:
+            return await uow.resumes.has_master_resume(profile_id)
 
     async def analyze_profile_and_prepare_resume_question(
         self,

@@ -92,7 +92,8 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(module=module), patch(f"{module}.interrupt", return_value="Not sure") as pause:
                 update = await cast(Any, node)(state, None)
-                pause.assert_called_once_with(question.model_dump())
+                expected = {"kind": "question", **question.model_dump()} if module.endswith("profile.nodes") else question.model_dump()
+                pause.assert_called_once_with(expected)
                 self.assertNotIn("missing_fields", update)
                 self.assertEqual(state.missing_fields, ["name"])
                 self.assertEqual(update["raw_answers"][0]["text"], question.text)
@@ -249,7 +250,7 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         result = await graph.ainvoke(
             Command(resume={"profile": edited, "approved": True}), config=config, context=context
         )
-        self.assertEqual(result["__interrupt__"][0].value, question.model_dump())
+        self.assertEqual(result["__interrupt__"][0].value, {"kind": "question", **question.model_dump()})
         self.assertEqual(service.analyze_data.await_args.kwargs["data"].raw_data, "Original story")
         service.update_profile.assert_not_awaited()
         result = await graph.ainvoke(Command(resume="Grace"), config=config, context=context)
